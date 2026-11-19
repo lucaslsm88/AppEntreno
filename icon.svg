@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="110" fill="url(#bg)"/>
+  <rect x="24" y="24" width="464" height="464" rx="90" fill="none" stroke="#334155" stroke-width="8"/>
+  <g transform="translate(100, 100) scale(0.61)">
+    <!-- Dumbbell icon -->
+    <path fill="url(#accent)" d="M440 200h-32v-32c0-17.7-14.3-32-32-32h-32c-17.7 0-32 14.3-32 32v24H200v-24c0-17.7-14.3-32-32-32h-32c-17.7 0-32 14.3-32 32v32H72c-17.7 0-32 14.3-32 32v112c0 17.7 14.3 32 32 32h32v32c0 17.7 14.3 32 32 32h32c17.7 0 32-14.3 32-32v-24h144v24c0 17.7 14.3 32 32 32h32c17.7 0 32-14.3 32-32v-32h32c17.7 0 32-14.3 32-32V232c0-17.7-14.3-32-32-32zm-304 88H80v-64h56v64zm64 0h-32v-64h32v64zm144-16H168v-32h176v32zm64 16h-32v-64h32v64zm56 0h-24v-64h24v64z"/>
+    <!-- Checkmark badge -->
+    <circle cx="410" cy="110" r="70" fill="#10b981"/>
+    <path fill="#ffffff" d="M380 110l20 20 45-45" stroke="#ffffff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

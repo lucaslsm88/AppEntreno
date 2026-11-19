@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Mi Rutina">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Encabezado Principal -->
+  <header>
+    <div class="container header-inner">
+      <div class="brand">
+        <span class="brand-icon">🏋️</span>
+        <div>
+          <h1>Entrenamiento</h1>
+          <div class="brand-subtitle">Planificador diario con videos de técnica</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="cloudModalBtn" class="btn-icon" title="Sincronizar con Google Sheets">
+          <span id="cloudStatusDot" class="sync-dot unconfigured"></span>
+          <span id="cloudStatusLabel">☁️ Nube</span>
+        </button>
+        <button id="qrModalBtn" class="btn-icon" title="Ver código QR para móvil">
+          <span>📱 Móvil (QR)</span>
+        </button>
+        <button id="themeToggleBtn" class="btn-icon" title="Cambiar tema">
+          <span id="themeIcon">☀️ Modo Claro</span>
+        </button>
+        <button id="openUploadBtn" class="btn-icon" style="background-color: var(--primary); color: #fff; border-color: var(--primary);">
+          <span>📂 Cargar Excel</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+
+    <!-- Pestañas de Navegación de Secciones -->
+    <nav class="view-tabs" aria-label="Secciones de la aplicación">
+      <button id="tabWorkoutBtn" class="view-tab active" type="button">
+        <span>📋 Rutina del Día</span>
+      </button>
+      <button id="tabHistoryBtn" class="view-tab" type="button">
+        <span>📈 Histórico de Pesos</span>
+      </button>
+    </nav>
+
+    <!-- VISTA 1: RUTINA DEL DÍA -->
+    <div id="workoutView">
+    
+      <!-- Barra de Estado de Archivo -->
+      <div class="file-status-bar">
+      <div class="file-status-info" id="fileStatusText">
+        <span class="status-dot"></span> Cargando datos...
+      </div>
+      <div class="file-status-actions">
+        <button id="downloadTemplateBtn" class="btn-link" title="Descargar formato en Excel">Descargar plantilla</button>
+        <span style="color: var(--border-color);">•</span>
+        <button id="resetCompletedDaysBtn" class="btn-link" style="color: var(--text-muted);" title="Reiniciar todos los días completados">Reiniciar días</button>
+      </div>
+    </div>
+
+    <!-- Controles de Selección: Semana y Día -->
+    <section class="controls-section">
+      <div class="selectors-card">
+        
+        <!-- Barra de Filtro de Días Pendientes -->
+        <div class="filter-bar">
+          <label class="filter-toggle" for="hideCompletedToggle">
+            <input type="checkbox" id="hideCompletedToggle" checked>
+            <span>Ver solo días pendientes</span>
+          </label>
+          <span id="overallProgressPill" class="overall-progress-pill">0 de 0 días terminados</span>
+        </div>
+
+        <div class="selector-grid">
+          <!-- Selector de Semana -->
+          <div class="selector-group">
+            <label for="weekSelect">📅 Seleccionar Semana</label>
+            <select id="weekSelect" class="custom-select"></select>
+          </div>
+
+          <!-- Selector de Día / Sesión -->
+          <div class="selector-group">
+            <label>⚡ Sesión / Día</label>
+            <div id="sessionPillsContainer" class="session-pills">
+              <!-- Se rellena dinámicamente con Dia 1, Dia 2, Dia 3 -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Barra de Resumen del Día (RPE y Progreso) -->
+        <div class="summary-bar">
+          <div class="rpe-container">
+            <span class="rpe-label">Intensidad del día:</span>
+            <div id="rpeBadge" class="rpe-badge">RPE -</div>
+            <button id="rpeInfoBtn" class="rpe-info-btn" title="¿Qué significa el RPE?">
+              ℹ️
+            </button>
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <span id="progressText" class="progress-counter">0 de 0 hechos</span>
+            <button id="resetChecksBtn" class="btn-link" style="color: var(--text-muted); font-size: 0.78rem;">Reiniciar checks</button>
+          </div>
+        </div>
+
+        <!-- Explicación de RPE Desplegable -->
+        <div id="rpeExplanation" class="rpe-explanation">
+          <strong>Guía rápida de RPE (Nivel de Esfuerzo Percibido):</strong><br>
+          • <strong>RPE 6-7:</strong> Moderado. Te sobran 3 o más repeticiones en el tanque (RIR 3+). Buen ritmo y velocidad.<br>
+          • <strong>RPE 7.5-8:</strong> Esfuerzo alto. Te sobran 2 repeticiones antes del fallo técnico (RIR 2).<br>
+          • <strong>RPE 8.5-9:</strong> Muy duro. Solo podrías hacer 1 repetición más con buena técnica (RIR 1).<br>
+          • <strong>RPE 10:</strong> Esfuerzo máximo. Límite técnico o 0 repeticiones restantes (RIR 0).
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Bloques de Ejercicios -->
+    <section class="blocks-section">
+
+      <!-- Bloque A -->
+      <article class="block-card">
+        <div class="block-header">
+          <div class="block-title-wrap">
+            <span class="block-tag tag-a">Bloque A</span>
+            <h2 class="block-title">Ejercicios Principales</h2>
+          </div>
+          <span id="countA" class="block-count">0 ej.</span>
+        </div>
+        <div id="blockAContainer">
+          <!-- Rellenado dinámicamente -->
+        </div>
+      </article>
+
+      <!-- Bloque B -->
+      <article class="block-card">
+        <div class="block-header">
+          <div class="block-title-wrap">
+            <span class="block-tag tag-b">Bloque B</span>
+            <h2 class="block-title">Accesorios y Fuerza</h2>
+          </div>
+          <span id="countB" class="block-count">0 ej.</span>
+        </div>
+        <div id="blockBContainer">
+          <!-- Rellenado dinámicamente -->
+        </div>
+      </article>
+
+      <!-- Bloque C -->
+      <article class="block-card">
+        <div class="block-header">
+          <div class="block-title-wrap">
+            <span class="block-tag tag-c">Bloque C</span>
+            <h2 class="block-title">Core, Movilidad y Finisher</h2>
+          </div>
+          <span id="countC" class="block-count">0 ej.</span>
+        </div>
+        <div id="blockCContainer">
+          <!-- Rellenado dinámicamente -->
+        </div>
+      </article>
+
+    </section>
+
+    <!-- Botón de Acción: Marcar Día como Terminado -->
+    <section class="day-action-section" id="dayActionSection">
+      <button id="toggleDayCompleteBtn" class="btn-complete-day">
+        <span id="btnCompleteIcon">✓</span>
+        <span id="btnCompleteText">Marcar este Día como Terminado</span>
+      </button>
+    </section>
+
+    <!-- Tarjeta cuando se completan todos los días de la planificación -->
+    <div id="allCompletedCard" class="all-completed-card" style="display: none;">
+      <div class="all-completed-icon">🏆</div>
+      <h3 class="all-completed-title">¡Has completado toda tu planificación!</h3>
+      <p class="all-completed-desc">No quedan días pendientes en este mesociclo. Puedes revisar el historial de tus entrenamientos o reiniciar el progreso si comienzas una nueva etapa.</p>
+      <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+        <button id="viewAllDaysBtn" class="btn-secondary">Ver historial de entrenamientos</button>
+        <button id="resetPlanProgressBtn" class="btn-icon" style="border-color: var(--primary); color: var(--primary);">Reiniciar progreso</button>
+      </div>
+    </div>
+
+    </div><!-- Fin #workoutView -->
+
+    <!-- VISTA 2: HISTÓRICO DE PESOS POR EJERCICIO (ÚLTIMOS 3 MESES) -->
+    <section id="historyView" class="history-section" style="display: none;">
+      <div class="history-top-bar">
+        <button id="backToWorkoutBtn" class="btn-icon" type="button">
+          <span>← Volver a la rutina</span>
+        </button>
+        <span class="history-period-badge">Últimos 3 meses (90 días)</span>
+      </div>
+
+      <div class="selectors-card">
+        <div class="selector-group">
+          <label for="historyExerciseSearch">🔎 Buscar Ejercicio (Nombre Normalizado)</label>
+          <div class="exercise-search-box" id="exerciseSearchBox">
+            <div class="exercise-search-input-wrap">
+              <input
+                type="text"
+                id="historyExerciseSearch"
+                class="exercise-search-input"
+                autocomplete="off"
+                placeholder="Escribe letras para buscar (ej: sentadilla, banca...)"
+              >
+              <button
+                type="button"
+                id="clearHistorySearchBtn"
+                class="exercise-search-clear"
+                title="Limpiar para buscar otro ejercicio"
+                aria-label="Limpiar búsqueda"
+              >✕</button>
+            </div>
+            <ul id="historyExerciseDropdown" class="exercise-search-dropdown" role="listbox"></ul>
+          </div>
+        </div>
+
+        <div class="history-summary-grid">
+          <div class="history-stat-box">
+            <span class="history-stat-label">Último peso registrado</span>
+            <span id="historyLastWeight" class="history-stat-value">—</span>
+          </div>
+          <div class="history-stat-box">
+            <span class="history-stat-label">Sesiones en 3 meses</span>
+            <span id="historyCountValue" class="history-stat-value">0</span>
+          </div>
+        </div>
+      </div>
+
+      <article class="block-card" style="margin-top: 18px;">
+        <div class="block-header">
+          <div class="block-title-wrap">
+            <span class="block-tag tag-a">Histórico</span>
+            <h2 id="historyExerciseTitle" class="block-title">Registros de peso</h2>
+          </div>
+          <span id="historyListCount" class="block-count">0 reg.</span>
+        </div>
+        <div id="historyListContainer">
+          <!-- Rellenado dinámicamente -->
+        </div>
+      </article>
+    </section>
+
+  </main>
+
+  <!-- Modal para Cargar Archivo Excel -->
+  <div id="uploadModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title">Cargar Planificación Excel</h3>
+        <button id="closeUploadModal" class="modal-close">&times;</button>
+      </div>
+
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 16px;">
+        Sube tu archivo de Excel con las columnas: <strong>Semana</strong>, <strong>Sesion</strong>, <strong>Bloque A</strong>, <strong>Bloque B</strong>, <strong>Bloque C</strong> y <strong>RPE</strong>.
+      </p>
+
+      <div id="dropzone" class="dropzone">
+        <div class="dropzone-icon">📊</div>
+        <div class="dropzone-title">Arrastra tu archivo Excel aquí</div>
+        <div class="dropzone-sub">o haz clic para explorar tus archivos (.xlsx, .xls, .csv)</div>
+        <input type="file" id="fileInput" class="hidden-input" accept=".xlsx, .xls, .csv">
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
+        <button id="restoreSampleBtn" class="btn-link" style="font-size: 0.82rem; color: var(--text-muted);">
+          Restaurar rutina de ejemplo
+        </button>
+        <button id="cancelUploadModalBtn" type="button" class="btn-secondary">
+          Cerrar
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal para Uso en Teléfono Móvil (Sin fugas externas de IP) -->
+  <div id="qrModal" class="modal-overlay">
+    <div class="modal-card" style="text-align: center;">
+      <div class="modal-header">
+        <h3 class="modal-title">📱 Usar de forma segura en tu Móvil</h3>
+        <button id="closeQrModal" class="modal-close">&times;</button>
+      </div>
+
+      <div style="font-size: 0.86rem; color: var(--text-muted); text-align: left; background: var(--bg-color); padding: 14px; border-radius: var(--radius-sm); margin-bottom: 16px; line-height: 1.5;">
+        🔒 <strong>Conexión privada y cifrada:</strong><br>
+        1. Por seguridad, el servidor de tu PC escucha únicamente en <code>127.0.0.1</code> para que nadie en una red Wi-Fi compartida pueda acceder a tu equipo.<br>
+        2. Para sincronizar tu móvil y tu PC de forma 100% cifrada por HTTPS, usa el botón <strong>☁️ Nube</strong> con tu propio Google Sheets protegido por clave secreta.<br>
+        3. En el gimnasio funciona <strong>100% sin cobertura</strong> y sincroniza tus pesos al recuperar conexión.
+      </div>
+
+      <button id="understandQrModalBtn" type="button" class="btn-secondary" style="width: 100%;">
+        Entendido
+      </button>
+    </div>
+  </div>
+
+  <!-- Modal para Sincronización Blindada con Google Sheets (AES-256-GCM + HMAC-SHA256) -->
+  <div id="cloudSyncModal" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title">🛡️ Nube Cifrada (Google Sheets)</h3>
+        <button id="closeCloudModal" class="modal-close">&times;</button>
+      </div>
+
+      <p style="font-size: 0.84rem; color: var(--text-muted); margin-bottom: 12px;">
+        Tus credenciales se cifran localmente con <strong>AES-256-GCM</strong> y cada conexión se firma con <strong>HMAC-SHA256</strong> (tu clave nunca viaja por internet ni queda en texto plano).
+      </p>
+
+      <div id="cloudSyncStatusInfo" class="cloud-status-banner">
+        Estado: Sin configurar (guardando solo en este navegador)
+      </div>
+
+      <!-- PANEL A: Desbloquear cofre cifrado existente -->
+      <div id="cloudUnlockPanel" style="display: none;">
+        <div class="selector-group" style="margin-bottom: 12px;">
+          <label for="unlockVaultPinInput">🔑 PIN / Contraseña local para desbloquear</label>
+          <input
+            type="password"
+            id="unlockVaultPinInput"
+            class="cloud-url-input"
+            placeholder="Introduce tu PIN local..."
+            autocomplete="current-password"
+          >
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+          <button id="unlockAndSyncBtn" type="button" class="btn-icon" style="flex: 1; justify-content: center; background-color: var(--primary); color: #fff; border-color: var(--primary); padding: 10px 14px;">
+            <span>🔓 Desbloquear y Sincronizar</span>
+          </button>
+          <button id="reconfigureVaultBtn" type="button" class="btn-secondary">
+            Reconfigurar
+          </button>
+        </div>
+      </div>
+
+      <!-- PANEL B: Cofre ya desbloqueado en memoria RAM -->
+      <div id="cloudUnlockedActionsPanel" style="display: none; margin-bottom: 14px;">
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button id="syncNowUnlockedBtn" type="button" class="btn-icon" style="flex: 1; justify-content: center; background-color: var(--primary); color: #fff; border-color: var(--primary); padding: 10px 14px;">
+            <span>🔄 Sincronizar ahora</span>
+          </button>
+          <button id="lockVaultNowBtn" type="button" class="btn-secondary" title="Borrar credenciales de la memoria RAM">
+            🔒 Bloquear
+          </button>
+          <button id="disconnectCloudBtn" type="button" class="btn-secondary" style="color: var(--accent-yt);">
+            Borrar cofre
+          </button>
+        </div>
+      </div>
+
+      <!-- PANEL C: Configurar nuevo cofre cifrado -->
+      <div id="cloudSetupPanel">
+        <div class="selector-group" style="margin-bottom: 12px;">
+          <label for="cloudScriptUrlInput">🔗 URL privada de tu Web App (/exec)</label>
+          <input
+            type="password"
+            id="cloudScriptUrlInput"
+            class="cloud-url-input"
+            placeholder="https://script.google.com/macros/s/.../exec"
+            autocomplete="off"
+          >
+        </div>
+
+        <div class="selector-group" style="margin-bottom: 12px;">
+          <label for="cloudApiSecretInput">🛡️ Clave Secreta API (API_SECRET_KEY)</label>
+          <div style="display: flex; gap: 8px;">
+            <input
+              type="password"
+              id="cloudApiSecretInput"
+              class="cloud-url-input"
+              placeholder="Mínimo 24 caracteres..."
+              autocomplete="off"
+              style="flex: 1;"
+            >
+            <button id="generateSecretKeyBtn" type="button" class="btn-secondary" style="white-space: nowrap;" title="Genera una clave aleatoria de 256 bits y la copia al portapapeles">
+              🎲 Generar y Copiar
+            </button>
+          </div>
+        </div>
+
+        <div class="selector-group" style="margin-bottom: 14px;">
+          <label for="cloudVaultPinInput">🔒 Crea un PIN / Contraseña Local (mín. 6 caracteres)</label>
+          <input
+            type="password"
+            id="cloudVaultPinInput"
+            class="cloud-url-input"
+            placeholder="Solo tú la sabes (cifra tus claves en este equipo)"
+            autocomplete="new-password"
+          >
+        </div>
+
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;">
+          <button id="saveAndSyncCloudBtn" type="button" class="btn-icon" style="flex: 1; justify-content: center; background-color: var(--primary); color: #fff; border-color: var(--primary); padding: 10px 14px;">
+            <span>🔐 Cifrar, Guardar y Sincronizar</span>
+          </button>
+        </div>
+      </div>
+
+      <details class="cloud-help-details">
+        <summary>¿Cómo activar el blindaje en Google Sheets? (4 pasos)</summary>
+        <ol class="cloud-help-steps">
+          <li>Crea una hoja vacía en tu Google Drive y abre <strong>Extensiones &rarr; Apps Script</strong>.</li>
+          <li>Pulsa abajo <strong>📋 Copiar código blindado</strong>, pégalo en Apps Script y guarda.</li>
+          <li>Pulsa arriba <strong>🎲 Generar y Copiar</strong>. En Apps Script entra en <strong>⚙️ Configuración del proyecto &rarr; Propiedades de secuencia de comandos</strong>, añade la propiedad <code>API_SECRET_KEY</code> y pega esa clave (así nunca queda escrita en el código ni en la hoja).</li>
+          <li>Pulsa <strong>Implementar &rarr; Nueva implementación</strong> (tipo <em>Aplicación web</em>, ejecutar como <em>Yo</em>, acceso <em>Cualquier persona</em>), copia la URL <code>/exec</code> y guárdala arriba con tu PIN local.</li>
+        </ol>
+        <button id="copyAppsScriptBtn" type="button" class="btn-secondary" style="width: 100%; margin-top: 10px;">
+          📋 Copiar código blindado de google_apps_script.gs
+        </button>
+      </details>
+    </div>
+  </div>
+
+  <!-- Toast de Notificación -->
+  <div id="toast" class="toast">
+    <span id="toastMessage">Acción completada</span>
+  </div>
+
+  <!-- Scripts locales verificados (sin dependencias externas ni scripts inline) -->
+  <script src="xlsx.full.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
