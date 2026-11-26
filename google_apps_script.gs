@@ -42,8 +42,9 @@ const DEFAULT_PLAN_ROWS = [
 ];
 
 // Cierre de datos en doGet:
-// Devuelve el estado cifrado con AES/SHA256-CTR + HMAC-SHA256 usando API_SECRET_KEY en la URL base limpia (sin parámetros GET),
-// de modo que abrir la URL en un navegador sin la clave NO expone ningún dato en texto plano, y la app puede leerlo con HTTP 200 incluso en Incógnito.
+// 1. Con ?payload=... firmado: procesa sincronización completa.
+// 2. Con ?ts=...&nonce=...&sig=... firmado con HMAC-SHA256: devuelve { plan, progress, weightHistory } verificado.
+// 3. Sin parámetros (URL base limpia): devuelve encryptedState cifrado con API_SECRET_KEY (cero datos en texto plano).
 function doGet(e) {
   const params = (e && e.parameter) ? e.parameter : {};
   if (typeof params.payload === 'string' && params.payload.length > 0) {
@@ -67,6 +68,21 @@ function doGet(e) {
   if (!currentState.plan.rows || currentState.plan.rows.length === 0) {
     currentState = mergeStates(currentState, { plan: { rows: [] }, progress: {}, weightHistory: [] });
     writeFullSheetState(ss, currentState);
+  }
+
+  if (typeof params.sig === 'string' && params.sig.length > 0) {
+    const authCheck = verifySignedGetRequest(params, secret.trim());
+    if (!authCheck.valid) {
+      return jsonResponse({ ok: false, error: authCheck.reason });
+    }
+    return jsonResponse({
+      ok: true,
+      apiSecretConfigured: true,
+      serverTime: Date.now(),
+      plan: currentState.plan,
+      progress: currentState.progress,
+      weightHistory: currentState.weightHistory
+    });
   }
 
   const encryptedState = encryptStateForClient({
@@ -198,6 +214,41 @@ function verifySignedRequest(payload, secret) {
   }
 
   // Protección anti-replay con CacheService (rechaza peticiones repetidas con el mismo nonce)
+  const cache = CacheService.getScriptCache();
+  const nonceKey = 'nonce_' + nonce.toLowerCase();
+  if (cache && cache.get(nonceKey)) {
+    return { valid: false, reason: 'No autorizado (solicitud duplicada detectada).' };
+  }
+  if (cache) {
+    cache.put(nonceKey, '1', 360);
+  }
+
+  return { valid: true };
+}
+
+function verifySignedGetRequest(params, secret) {
+  const ts = Number(params && params.ts);
+  const nonce = String((params && params.nonce) || '');
+  const sig = String((params && params.sig) || '').toLowerCase();
+
+  if (!ts || !isFinite(ts) || Math.abs(Date.now() - ts) > MAX_AUTH_SKEW_MS) {
+    return { valid: false, reason: 'No autorizado (marca de tiempo expirada o reloj desajustado).' };
+  }
+  if (!/^[a-f0-9]{24,64}$/i.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) {
+    return { valid: false, reason: 'No autorizado (formato de firma inválido).' };
+  }
+
+  const canonical = 'GET.' + String(ts) + '.' + nonce;
+  const computedHmacBytes = Utilities.computeHmacSha256Signature(
+    canonical,
+    secret,
+    Utilities.Charset.UTF_8
+  );
+  const computedSigHex = bytesToHex(computedHmacBytes);
+  if (!constantTimeEquals(computedSigHex, sig)) {
+    return { valid: false, reason: 'No autorizado (clave secreta incorrecta).' };
+  }
+
   const cache = CacheService.getScriptCache();
   const nonceKey = 'nonce_' + nonce.toLowerCase();
   if (cache && cache.get(nonceKey)) {
@@ -669,6 +720,9 @@ function writeFullSheetState(ss, state) {
   const pRange = progressSheet.getRange(2, 1, progressRows.length, 3);
   progressSheet.getRange(2, 1, progressRows.length, 2).setNumberFormat('@');
   pRange.setValues(progressRows);
+  try {
+    SpreadsheetApp.flush();
+  } catch (_) {}
 }
 
 function normalizeKey(text) {

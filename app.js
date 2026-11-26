@@ -2639,7 +2639,9 @@ function updateCloudStatusUI() {
       cloudSyncStatusInfo.textContent = `Estado: Cambios guardados en local pendientes de enviar (se subirán al tener internet)${lastTxt}`;
     } else {
       const lastTxt = lastSyncTimestamp ? formatSyncTime(lastSyncTimestamp) : 'recién verificado';
-      cloudSyncStatusInfo.textContent = `Estado: ✓ Sincronizado de forma cifrada con Google Sheets (${lastTxt})`;
+      const doneDays = getTotalCompletedDays();
+      const activeWeights = Array.isArray(weightHistory) ? weightHistory.filter(e => e && !e.deleted).length : 0;
+      cloudSyncStatusInfo.textContent = `Estado: ✓ Sincronizado (${doneDays} días terminados · ${activeWeights} pesos en histórico · ${lastTxt})`;
     }
   }
 }
@@ -2910,6 +2912,15 @@ async function decryptStateFromServer(encObj, apiSecret) {
   return JSON.parse(utf8Decode(plainBytes));
 }
 
+async function buildSignedGetUrl(url, apiSecret) {
+  const ts = Date.now();
+  const nonce = generateRandomHex(16);
+  const canonical = `GET.${ts}.${nonce}`;
+  const sig = await hmacSha256Hex(apiSecret, canonical);
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}ts=${ts}&nonce=${nonce}&sig=${sig}`;
+}
+
 async function sendSignedSyncRequest(url, apiSecret) {
   // 1. Si el navegador tiene datos o cambios locales (pesos, días completados, checks o Excel),
   // los subimos primero mediante POST firmado con HMAC-SHA256 a doPost(e).
@@ -2938,18 +2949,30 @@ async function sendSignedSyncRequest(url, apiSecret) {
     }
   }
 
-  // 2. Descargar el estado completo desde la URL base limpia (GET sin parámetros en la URL,
-  // que siempre devuelve HTTP 200 tanto en navegador normal como en Modo Incógnito) y descifrarlo en RAM.
-  const getResp = await fetch(url, {
-    method: 'GET',
-    redirect: 'follow'
-  });
+  // 2. Descargar el estado completo: intentamos primero GET con firma corta (?ts=...&nonce=...&sig=...)
+  // compatible con v13 y v15, y si el navegador/proxy rechaza parámetros en la URL, usamos la URL base limpia (encryptedState).
+  let getResp;
+  try {
+    const signedGetUrl = await buildSignedGetUrl(url, apiSecret);
+    getResp = await fetch(signedGetUrl, {
+      method: 'GET',
+      redirect: 'follow'
+    });
+  } catch (_) {
+    getResp = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow'
+    });
+  }
 
   if (!getResp.ok) {
     throw new Error(`HTTP ${getResp.status}`);
   }
 
   const getData = await getResp.json();
+  if (getData && getData.ok === false) {
+    throw new Error(getData.error || 'Solicitud rechazada por Google Sheets.');
+  }
   if (getData && getData.ok && getData.apiSecretConfigured === false) {
     throw new Error(getData.status || 'Falta configurar API_SECRET_KEY en Propiedades de secuencia de comandos.');
   }
@@ -2965,7 +2988,14 @@ async function sendSignedSyncRequest(url, apiSecret) {
     };
   }
 
-  return getData;
+  if (getData && getData.ok && getData.plan) {
+    return getData;
+  }
+
+  throw new Error(
+    'Tu Google Sheet respondió sin enviar los datos (tiene una versión anterior del código en Apps Script). ' +
+    'Pulsa abajo "📋 Copiar código blindado", pégalo en Apps Script → Guardar → Administrar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar.'
+  );
 }
 
 async function syncWithGoogleSheets(options = { silent: true }) {
@@ -3086,6 +3116,21 @@ function doGet(e) {
     writeFullSheetState(ss, currentState);
   }
 
+  if (typeof params.sig === 'string' && params.sig.length > 0) {
+    const authCheck = verifySignedGetRequest(params, secret.trim());
+    if (!authCheck.valid) {
+      return jsonResponse({ ok: false, error: authCheck.reason });
+    }
+    return jsonResponse({
+      ok: true,
+      apiSecretConfigured: true,
+      serverTime: Date.now(),
+      plan: currentState.plan,
+      progress: currentState.progress,
+      weightHistory: currentState.weightHistory
+    });
+  }
+
   const encryptedState = encryptStateForClient({
     serverTime: Date.now(),
     plan: currentState.plan,
@@ -3190,6 +3235,36 @@ function verifySignedRequest(payload, secret) {
   }
 
   const canonical = String(ts) + '.' + nonce + '.' + computedBodyHex;
+  const computedSigHex = bytesToHex(
+    Utilities.computeHmacSha256Signature(canonical, secret, Utilities.Charset.UTF_8)
+  );
+  if (!constantTimeEquals(computedSigHex, sig)) {
+    return { valid: false, reason: 'No autorizado (clave secreta incorrecta).' };
+  }
+
+  const cache = CacheService.getScriptCache();
+  const nonceKey = 'nonce_' + nonce.toLowerCase();
+  if (cache && cache.get(nonceKey)) {
+    return { valid: false, reason: 'No autorizado (solicitud duplicada detectada).' };
+  }
+  if (cache) cache.put(nonceKey, '1', 360);
+
+  return { valid: true };
+}
+
+function verifySignedGetRequest(params, secret) {
+  const ts = Number(params && params.ts);
+  const nonce = String((params && params.nonce) || '');
+  const sig = String((params && params.sig) || '').toLowerCase();
+
+  if (!ts || !isFinite(ts) || Math.abs(Date.now() - ts) > MAX_AUTH_SKEW_MS) {
+    return { valid: false, reason: 'No autorizado (marca de tiempo expirada o reloj desajustado).' };
+  }
+  if (!/^[a-f0-9]{24,64}$/i.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) {
+    return { valid: false, reason: 'No autorizado (formato de firma invalido).' };
+  }
+
+  const canonical = 'GET.' + String(ts) + '.' + nonce;
   const computedSigHex = bytesToHex(
     Utilities.computeHmacSha256Signature(canonical, secret, Utilities.Charset.UTF_8)
   );
@@ -3523,6 +3598,7 @@ function writeFullSheetState(ss, state) {
   const pMeta = { updatedAt: (state.plan && state.plan.updatedAt) || now, isCustomData: Boolean(state.plan && state.plan.isCustomData), signature: JSON.stringify(pRows) };
   prSheet.getRange(2, 1, 2, 2).setNumberFormat('@');
   prSheet.getRange(2, 1, 2, 3).setValues([['plan_meta', JSON.stringify(pMeta), pMeta.updatedAt], ['progress_state', JSON.stringify(state.progress || {}), now]]);
+  try { SpreadsheetApp.flush(); } catch (_) {}
 }
 
 function normalizeKey(t) {
