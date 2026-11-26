@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-1+nCyn1GKJ4LsEHBXICsCKlkKzYUVvBM/rz0NelNEds='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-0BUedU/XGcJXUYioxQ2OBwI2gQ0I2303GU5hjQwkkuY='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Mi Rutina">
@@ -4449,12 +4449,13 @@ function scheduleCloudSync() {
   }, 1500);
 }
 
-function buildClientSyncPayload() {
+function buildClientSyncPayload(options = { includePlanRows: true }) {
+  const shouldSendRows = Boolean(options.includePlanRows && isCustomData);
   return {
     plan: {
       updatedAt: planUpdatedAt || 0,
       isCustomData: Boolean(isCustomData),
-      rows: workoutData
+      rows: shouldSendRows ? workoutData : []
     },
     progress: {
       cycleId: currentCycleId,
@@ -4628,37 +4629,35 @@ async function buildSignedSyncEnvelope(apiSecret, clientStateObj) {
   };
 }
 
-async function sendSignedSyncRequest(url, apiSecret, clientPayload) {
-  const signedEnvelope = await buildSignedSyncEnvelope(apiSecret, clientPayload);
+async function sendSignedSyncRequest(url, apiSecret) {
+  const fullPayload = buildClientSyncPayload({ includePlanRows: true });
+  const signedEnvelope = await buildSignedSyncEnvelope(apiSecret, fullPayload);
   const envelopeStr = JSON.stringify(signedEnvelope);
 
-  // 1. Intentar POST directo con text/plain
+  // 1. Intentar POST directo sin cabeceras personalizadas para facilitar el redirect 302 de Google Apps Script
   try {
     const postResp = await fetch(url, {
       method: 'POST',
       redirect: 'follow',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8'
-      },
       body: envelopeStr
     });
     if (!postResp.ok) {
       throw new Error(`HTTP ${postResp.status}`);
     }
-    const postData = await postResp.json();
-    return postData;
+    return await postResp.json();
   } catch (postErr) {
     const msg = String(postErr && postErr.message ? postErr.message : postErr);
     if (!/failed to fetch|networkerror|load failed/i.test(msg)) {
       throw postErr;
     }
 
-    // 2. Respaldo automático anti-bloqueo CORS 302 de Google Apps Script mediante GET firmado con HMAC-SHA256
-    const encodedPayload = encodeURIComponent(envelopeStr);
+    // 2. Respaldo automático anti-bloqueo CORS 302:
+    // Si el paquete cabe en una URL corta (<= 1700 caracteres), hacer sincronización directa en 1 solo GET firmado con HMAC-SHA256
+    const encodedFull = encodeURIComponent(envelopeStr);
     const sep = url.includes('?') ? '&' : '?';
 
-    if (encodedPayload.length <= 6500) {
-      const getResp = await fetch(`${url}${sep}payload=${encodedPayload}`, {
+    if (encodedFull.length <= 1700) {
+      const getResp = await fetch(`${url}${sep}payload=${encodedFull}`, {
         method: 'GET',
         redirect: 'follow'
       });
@@ -4667,18 +4666,19 @@ async function sendSignedSyncRequest(url, apiSecret, clientPayload) {
       }
       const getData = await getResp.json();
       if (getData && getData.ok && !getData.plan && getData.status) {
-        throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Gestionar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
+        throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Administrar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
       }
       return getData;
     }
 
-    // 3. Si el paquete supera 6.5 KB (ej. carga masiva de Excel), enviar escritura por POST no-cors y leer estado fusionado por GET firmado
+    // 3. Si el paquete supera 1.7 KB (ej. rutina Excel personalizada o histórico extenso):
+    // Enviar escritura completa por POST no-cors y leer el estado fusionado con un GET firmado ultracompacto (< 500 bytes)
     await fetch(url, {
       method: 'POST',
       mode: 'no-cors',
       body: envelopeStr
     });
-    const readOnlyEnvelope = await buildSignedSyncEnvelope(apiSecret, {
+    const compactReadEnvelope = await buildSignedSyncEnvelope(apiSecret, {
       plan: { updatedAt: 0, isCustomData: false, rows: [] },
       progress: {
         cycleId: currentCycleId,
@@ -4689,7 +4689,7 @@ async function sendSignedSyncRequest(url, apiSecret, clientPayload) {
       },
       weightHistory: []
     });
-    const readEncoded = encodeURIComponent(JSON.stringify(readOnlyEnvelope));
+    const readEncoded = encodeURIComponent(JSON.stringify(compactReadEnvelope));
     const readResp = await fetch(`${url}${sep}payload=${readEncoded}`, {
       method: 'GET',
       redirect: 'follow'
@@ -4699,7 +4699,7 @@ async function sendSignedSyncRequest(url, apiSecret, clientPayload) {
     }
     const readData = await readResp.json();
     if (readData && readData.ok && !readData.plan && readData.status) {
-      throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Gestionar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
+      throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Administrar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
     }
     return readData;
   }
@@ -4715,7 +4715,7 @@ async function syncWithGoogleSheets(options = { silent: true }) {
   updateCloudStatusUI();
 
   try {
-    const data = await sendSignedSyncRequest(url, apiSecret, buildClientSyncPayload());
+    const data = await sendSignedSyncRequest(url, apiSecret);
     if (!data || !data.ok) {
       throw new Error((data && data.error) || 'Respuesta rechazada por el servidor.');
     }
@@ -4782,6 +4782,21 @@ const MAX_PAYLOAD_BYTES = 250 * 1024;
 const MAX_AUTH_SKEW_MS = 5 * 60 * 1000;
 const MAX_PLAN_ROWS = 500;
 const MAX_HISTORY_ROWS = 2000;
+
+const DEFAULT_PLAN_ROWS = [
+  { semana: '1', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 4x6', bloque_b: 'Press banca plano 3x8\\nRemo con barra 3x10', bloque_c: 'Plancha abdominal 3x45s\\nElevaciones de piernas 3x12', rpe: '7' },
+  { semana: '1', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 3x5', bloque_b: 'Press militar con barra 3x8\\nDominadas asistidas 3x8', bloque_c: 'Paseo del granjero 3x30m\\nFace pull en polea 3x15', rpe: '7.5' },
+  { semana: '1', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 4x8', bloque_b: 'Press inclinado con mancuernas 3x10\\nJalón al pecho agarre neutro 3x10', bloque_c: 'Press pallof 3x12\\nCurl de bíceps con barra 3x12', rpe: '7' },
+  { semana: '2', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 4x6 (+2.5kg)', bloque_b: 'Press banca plano 3x8\\nRemo con barra 3x10', bloque_c: 'Plancha abdominal 3x50s\\nElevaciones de piernas 3x15', rpe: '7.5' },
+  { semana: '2', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 3x5 (+5kg)', bloque_b: 'Press militar con barra 3x8\\nDominadas 3x8', bloque_c: 'Paseo del granjero 3x35m\\nFace pull en polea 3x15', rpe: '8' },
+  { semana: '2', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 4x8 (+5kg)', bloque_b: 'Press inclinado con mancuernas 3x10\\nJalón al pecho agarre neutro 3x10', bloque_c: 'Press pallof 3x12\\nCurl de bíceps con barra 3x12', rpe: '7.5' },
+  { semana: '3', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 4x5 (+5kg)', bloque_b: 'Press banca plano 4x6\\nRemo con barra 4x8', bloque_c: 'Ab wheel rollout 3x10\\nElevaciones de piernas 3x15', rpe: '8' },
+  { semana: '3', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 3x4 (+7.5kg)', bloque_b: 'Press militar con barra 4x6\\nDominadas lastradas 3x6', bloque_c: 'Paseo del granjero 3x40m\\nFace pull en polea 3x20', rpe: '8.5' },
+  { semana: '3', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 4x6 (+10kg)', bloque_b: 'Press inclinado con mancuernas 4x8\\nJalón al pecho agarre neutro 4x8', bloque_c: 'Press pallof 3x15\\nCurl martillo con mancuernas 3x12', rpe: '8' },
+  { semana: '4', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 3x5 (carga ligera)', bloque_b: 'Press banca plano 3x6\\nRemo con mancuerna 3x8', bloque_c: 'Plancha abdominal 3x30s', rpe: '6' },
+  { semana: '4', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 2x5 (carga ligera)', bloque_b: 'Press militar con mancuernas 3x8\\nJalón al pecho 3x10', bloque_c: 'Face pull en polea 3x12', rpe: '6' },
+  { semana: '4', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 3x8 (carga ligera)', bloque_b: 'Press banca con mancuernas 3x10\\nRemo en polea baja 3x10', bloque_c: 'Paseo del granjero 2x30m', rpe: '6' }
+];
 
 function doGet(e) {
   if (e && e.parameter && typeof e.parameter.payload === 'string' && e.parameter.payload.length > 0) {
@@ -5095,11 +5110,13 @@ function readFullSheetState(ss) {
 function mergeStates(serverState, clientState) {
   let mergedPlan = serverState.plan;
   const cPlan = clientState.plan;
+  const serverEmpty = !serverState.plan.rows || serverState.plan.rows.length === 0;
   if (cPlan && Array.isArray(cPlan.rows) && cPlan.rows.length > 0) {
-    const serverEmpty = !serverState.plan.rows || serverState.plan.rows.length === 0;
     if (serverEmpty || (Number(cPlan.updatedAt) || 0) > (Number(serverState.plan.updatedAt) || 0)) {
       mergedPlan = { updatedAt: Number(cPlan.updatedAt) || Date.now(), isCustomData: Boolean(cPlan.isCustomData), rows: cPlan.rows.slice(0, MAX_PLAN_ROWS) };
     }
+  } else if (serverEmpty) {
+    mergedPlan = { updatedAt: 0, isCustomData: false, rows: DEFAULT_PLAN_ROWS };
   }
   const hMap = {};
   (serverState.weightHistory || []).forEach(e => { if (e && e.id) hMap[e.id] = e; });

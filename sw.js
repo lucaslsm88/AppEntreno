@@ -1,5 +1,5 @@
 // Service Worker para funcionamiento 100% OFFLINE en el móvil
-const CACHE_NAME = 'rutina-gym-cache-v10';
+const CACHE_NAME = 'rutina-gym-cache-v11';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',

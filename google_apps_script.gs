@@ -26,6 +26,21 @@ const MAX_AUTH_SKEW_MS = 5 * 60 * 1000; // Ventana máxima de 5 minutos (anti-re
 const MAX_PLAN_ROWS = 500;
 const MAX_HISTORY_ROWS = 2000;
 
+const DEFAULT_PLAN_ROWS = [
+  { semana: '1', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 4x6', bloque_b: 'Press banca plano 3x8\nRemo con barra 3x10', bloque_c: 'Plancha abdominal 3x45s\nElevaciones de piernas 3x12', rpe: '7' },
+  { semana: '1', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 3x5', bloque_b: 'Press militar con barra 3x8\nDominadas asistidas 3x8', bloque_c: 'Paseo del granjero 3x30m\nFace pull en polea 3x15', rpe: '7.5' },
+  { semana: '1', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 4x8', bloque_b: 'Press inclinado con mancuernas 3x10\nJalón al pecho agarre neutro 3x10', bloque_c: 'Press pallof 3x12\nCurl de bíceps con barra 3x12', rpe: '7' },
+  { semana: '2', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 4x6 (+2.5kg)', bloque_b: 'Press banca plano 3x8\nRemo con barra 3x10', bloque_c: 'Plancha abdominal 3x50s\nElevaciones de piernas 3x15', rpe: '7.5' },
+  { semana: '2', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 3x5 (+5kg)', bloque_b: 'Press militar con barra 3x8\nDominadas 3x8', bloque_c: 'Paseo del granjero 3x35m\nFace pull en polea 3x15', rpe: '8' },
+  { semana: '2', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 4x8 (+5kg)', bloque_b: 'Press inclinado con mancuernas 3x10\nJalón al pecho agarre neutro 3x10', bloque_c: 'Press pallof 3x12\nCurl de bíceps con barra 3x12', rpe: '7.5' },
+  { semana: '3', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 4x5 (+5kg)', bloque_b: 'Press banca plano 4x6\nRemo con barra 4x8', bloque_c: 'Ab wheel rollout 3x10\nElevaciones de piernas 3x15', rpe: '8' },
+  { semana: '3', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 3x4 (+7.5kg)', bloque_b: 'Press militar con barra 4x6\nDominadas lastradas 3x6', bloque_c: 'Paseo del granjero 3x40m\nFace pull en polea 3x20', rpe: '8.5' },
+  { semana: '3', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 4x6 (+10kg)', bloque_b: 'Press inclinado con mancuernas 4x8\nJalón al pecho agarre neutro 4x8', bloque_c: 'Press pallof 3x15\nCurl martillo con mancuernas 3x12', rpe: '8' },
+  { semana: '4', sesion: 'Dia 1', bloque_a: 'Sentadilla trasera con barra 3x5 (carga ligera)', bloque_b: 'Press banca plano 3x6\nRemo con mancuerna 3x8', bloque_c: 'Plancha abdominal 3x30s', rpe: '6' },
+  { semana: '4', sesion: 'Dia 2', bloque_a: 'Peso muerto convencional 2x5 (carga ligera)', bloque_b: 'Press militar con mancuernas 3x8\nJalón al pecho 3x10', bloque_c: 'Face pull en polea 3x12', rpe: '6' },
+  { semana: '4', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 3x8 (carga ligera)', bloque_b: 'Press banca con mancuernas 3x10\nRemo en polea baja 3x10', bloque_c: 'Paseo del granjero 2x30m', rpe: '6' }
+];
+
 // Cierre de datos en doGet: si no trae un payload firmado con HMAC-SHA256, NO expone ningún dato personal.
 // Si recibe ?payload=... firmado criptográficamente, procesa la sincronización (evitando bloqueos CORS 302 de POST en navegadores).
 function doGet(e) {
@@ -415,8 +430,8 @@ function readFullSheetState(ss) {
 function mergeStates(serverState, clientState) {
   let mergedPlan = serverState.plan;
   const cPlan = clientState.plan;
+  const serverEmpty = !serverState.plan.rows || serverState.plan.rows.length === 0;
   if (cPlan && Array.isArray(cPlan.rows) && cPlan.rows.length > 0) {
-    const serverEmpty = !serverState.plan.rows || serverState.plan.rows.length === 0;
     const clientTime = Number(cPlan.updatedAt) || 0;
     const serverTime = Number(serverState.plan.updatedAt) || 0;
     if (serverEmpty || clientTime > serverTime) {
@@ -426,6 +441,12 @@ function mergeStates(serverState, clientState) {
         rows: cPlan.rows.slice(0, MAX_PLAN_ROWS)
       };
     }
+  } else if (serverEmpty) {
+    mergedPlan = {
+      updatedAt: 0,
+      isCustomData: false,
+      rows: DEFAULT_PLAN_ROWS
+    };
   }
 
   const historyMap = {};
