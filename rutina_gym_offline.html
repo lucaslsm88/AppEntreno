@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-wQVMKWzkte0DMe9m+1mUGTeAb8hacQkveHCqyUHzGLw='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-nd8jOqKKEgHEsZiarjVMuzdo61D7bpvOp+yZ8PmTY3I='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Mi Rutina">
@@ -4676,7 +4676,19 @@ async function syncWithGoogleSheets(options = { silent: true }) {
     }
     return true;
   } catch (err) {
-    const safeDetail = String(err && err.message ? err.message : err)
+    const rawErrMsg = String(err && err.message ? err.message : err);
+    let diagDetail = '';
+    if (/failed to fetch|networkerror|load failed/i.test(rawErrMsg)) {
+      try {
+        const probeResp = await fetch(url, { method: 'GET', redirect: 'follow' });
+        const probeText = await probeResp.text();
+        diagDetail = `\n\n🔎 Diagnóstico GET (HTTP ${probeResp.status}): ${probeText.slice(0, 220)}`;
+      } catch (probeErr) {
+        const probeMsg = String(probeErr && probeErr.message ? probeErr.message : probeErr);
+        diagDetail = `\n\n🔎 Diagnóstico GET también falló (${probeMsg}). Verifica haber borrado el cofre y pegado la URL /exec exacta.`;
+      }
+    }
+    const safeDetail = (rawErrMsg + diagDetail)
       .replace(/https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec/gi, '[URL_PROTEGIDA]');
     console.warn('Sincronización diferida o rechazada:', safeDetail);
     isSyncInFlight = false;

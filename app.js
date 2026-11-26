@@ -2882,7 +2882,19 @@ async function syncWithGoogleSheets(options = { silent: true }) {
     }
     return true;
   } catch (err) {
-    const safeDetail = String(err && err.message ? err.message : err)
+    const rawErrMsg = String(err && err.message ? err.message : err);
+    let diagDetail = '';
+    if (/failed to fetch|networkerror|load failed/i.test(rawErrMsg)) {
+      try {
+        const probeResp = await fetch(url, { method: 'GET', redirect: 'follow' });
+        const probeText = await probeResp.text();
+        diagDetail = `\n\n🔎 Diagnóstico GET (HTTP ${probeResp.status}): ${probeText.slice(0, 220)}`;
+      } catch (probeErr) {
+        const probeMsg = String(probeErr && probeErr.message ? probeErr.message : probeErr);
+        diagDetail = `\n\n🔎 Diagnóstico GET también falló (${probeMsg}). Verifica haber borrado el cofre y pegado la URL /exec exacta.`;
+      }
+    }
+    const safeDetail = (rawErrMsg + diagDetail)
       .replace(/https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec/gi, '[URL_PROTEGIDA]');
     console.warn('Sincronización diferida o rechazada:', safeDetail);
     isSyncInFlight = false;
