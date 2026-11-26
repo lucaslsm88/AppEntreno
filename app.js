@@ -183,7 +183,13 @@ function registerServiceWorkerIfSupported() {
     window.location &&
     (window.location.protocol === 'http:' || window.location.protocol === 'https:')
   ) {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+      .then((reg) => {
+        if (reg && typeof reg.update === 'function') {
+          reg.update().catch(() => {});
+        }
+      })
+      .catch(() => {});
     let refreshing = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (!refreshing && window.location && typeof window.location.reload === 'function') {
@@ -2837,78 +2843,54 @@ async function buildSignedSyncEnvelope(apiSecret, clientStateObj) {
 
 async function sendSignedSyncRequest(url, apiSecret) {
   const fullPayload = buildClientSyncPayload({ includePlanRows: true });
-  const signedEnvelope = await buildSignedSyncEnvelope(apiSecret, fullPayload);
-  const envelopeStr = JSON.stringify(signedEnvelope);
+  const postEnvelope = await buildSignedSyncEnvelope(apiSecret, fullPayload);
+  const postEnvelopeStr = JSON.stringify(postEnvelope);
 
-  // 1. Intentar POST directo sin cabeceras personalizadas para facilitar el redirect 302 de Google Apps Script
+  // 1. Enviar POST firmado con HMAC-SHA256 a doPost(e) para actualizar Google Sheets.
+  // Nota: En algunos navegadores, Google Apps Script ejecuta doPost(e) y actualiza el Excel perfectamente,
+  // pero la redirección 302 posterior de POST a script.googleusercontent.com lanza "Failed to fetch" en modo CORS.
   try {
     const postResp = await fetch(url, {
       method: 'POST',
       redirect: 'follow',
-      body: envelopeStr
+      body: postEnvelopeStr
     });
-    if (!postResp.ok) {
-      throw new Error(`HTTP ${postResp.status}`);
+    if (postResp.ok) {
+      return await postResp.json();
     }
-    return await postResp.json();
   } catch (postErr) {
     const msg = String(postErr && postErr.message ? postErr.message : postErr);
     if (!/failed to fetch|networkerror|load failed/i.test(msg)) {
       throw postErr;
     }
-
-    // 2. Respaldo automático anti-bloqueo CORS 302:
-    // Si el paquete cabe en una URL corta (<= 1700 caracteres), hacer sincronización directa en 1 solo GET firmado con HMAC-SHA256
-    const encodedFull = encodeURIComponent(envelopeStr);
-    const sep = url.includes('?') ? '&' : '?';
-
-    if (encodedFull.length <= 1700) {
-      const getResp = await fetch(`${url}${sep}payload=${encodedFull}`, {
-        method: 'GET',
-        redirect: 'follow'
-      });
-      if (!getResp.ok) {
-        throw new Error(`HTTP ${getResp.status}`);
-      }
-      const getData = await getResp.json();
-      if (getData && getData.ok && !getData.plan && getData.status) {
-        throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Administrar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
-      }
-      return getData;
-    }
-
-    // 3. Si el paquete supera 1.7 KB (ej. rutina Excel personalizada o histórico extenso):
-    // Enviar escritura completa por POST no-cors y leer el estado fusionado con un GET firmado ultracompacto (< 500 bytes)
-    await fetch(url, {
-      method: 'POST',
-      mode: 'no-cors',
-      body: envelopeStr
-    });
-    const compactReadEnvelope = await buildSignedSyncEnvelope(apiSecret, {
-      plan: { updatedAt: 0, isCustomData: false, rows: [] },
-      progress: {
-        cycleId: currentCycleId,
-        cycleUpdatedAt: cycleUpdatedAt || 0,
-        completedDays: {},
-        completedChecks: {},
-        sessionWeights: {}
-      },
-      weightHistory: []
-    });
-    const readEncoded = encodeURIComponent(JSON.stringify(compactReadEnvelope));
-    const readResp = await fetch(`${url}${sep}payload=${readEncoded}`, {
-      method: 'GET',
-      redirect: 'follow'
-    });
-    if (!readResp.ok) {
-      throw new Error(`HTTP ${readResp.status}`);
-    }
-    const readData = await readResp.json();
-    if (readData && readData.ok && !readData.plan && readData.status) {
-      throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Administrar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
-    }
-    return readData;
   }
+
+  // 2. El POST ya fue enviado (o redirigido con 302). Ahora realizamos un GET firmado con un NONCE NUEVO
+  // (< 500 caracteres) que siempre devuelve HTTP 200 sin bloqueo CORS 302 para confirmar y leer el estado de la hoja.
+  const sep = url.includes('?') ? '&' : '?';
+  const freshGetPayload = buildClientSyncPayload({ includePlanRows: false });
+  const freshGetEnvelope = await buildSignedSyncEnvelope(apiSecret, freshGetPayload);
+  const freshGetStr = JSON.stringify(freshGetEnvelope);
+  const encodedGet = encodeURIComponent(freshGetStr);
+
+  const getUrl = encodedGet.length <= 1700
+    ? `${url}${sep}payload=${encodedGet}`
+    : url;
+
+  const getResp = await fetch(getUrl, {
+    method: 'GET',
+    redirect: 'follow'
+  });
+
+  if (!getResp.ok) {
+    throw new Error(`HTTP ${getResp.status}`);
+  }
+
+  const getData = await getResp.json();
+  if (getData && getData.ok && getData.apiSecretConfigured === false) {
+    throw new Error(getData.status || 'Falta configurar API_SECRET_KEY en Propiedades de secuencia de comandos.');
+  }
+  return getData;
 }
 
 async function syncWithGoogleSheets(options = { silent: true }) {

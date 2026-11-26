@@ -1,10 +1,11 @@
 // Service Worker para funcionamiento 100% OFFLINE en el móvil
-const CACHE_NAME = 'rutina-gym-cache-v11';
+const CACHE_NAME = 'rutina-gym-cache-v12';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './app.js?v=12',
   './xlsx.full.min.js',
   './manifest.json',
   './icon.svg'
@@ -41,7 +42,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { cache: 'no-cache' })
       .then((networkResponse) => {
         if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
           const responseToCache = networkResponse.clone();
