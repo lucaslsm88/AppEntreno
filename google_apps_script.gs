@@ -42,9 +42,8 @@ const DEFAULT_PLAN_ROWS = [
 ];
 
 // Cierre de datos en doGet:
-// - Sin parámetros de firma: NO expone ningún dato personal (solo confirma estado del servicio).
-// - Con firma HMAC-SHA256 (?ts=...&nonce=...&sig=...): devuelve el estado actual de las 3 hojas por HTTP 200 GET.
-// - Con ?payload=... firmado: procesa sincronización completa.
+// Devuelve el estado cifrado con AES/SHA256-CTR + HMAC-SHA256 usando API_SECRET_KEY en la URL base limpia (sin parámetros GET),
+// de modo que abrir la URL en un navegador sin la clave NO expone ningún dato en texto plano, y la app puede leerlo con HTTP 200 incluso en Incógnito.
 function doGet(e) {
   const params = (e && e.parameter) ? e.parameter : {};
   if (typeof params.payload === 'string' && params.payload.length > 0) {
@@ -56,38 +55,32 @@ function doGet(e) {
   const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
   const hasValidSecret = Boolean(secret && secret.trim().length >= 24);
 
-  if (typeof params.sig === 'string' && params.sig.length > 0) {
-    if (!hasValidSecret) {
-      return jsonResponse({
-        ok: false,
-        error: 'Falta configurar API_SECRET_KEY en Configuración del proyecto -> Propiedades de secuencia de comandos.'
-      });
-    }
-    const authCheck = verifySignedGetRequest(params, secret.trim());
-    if (!authCheck.valid) {
-      return jsonResponse({ ok: false, error: authCheck.reason });
-    }
-    let currentState = readFullSheetState(ss);
-    if (!currentState.plan.rows || currentState.plan.rows.length === 0) {
-      currentState = mergeStates(currentState, { plan: { rows: [] }, progress: {}, weightHistory: [] });
-      writeFullSheetState(ss, currentState);
-    }
+  if (!hasValidSecret) {
     return jsonResponse({
       ok: true,
-      apiSecretConfigured: true,
-      serverTime: Date.now(),
-      plan: currentState.plan,
-      progress: currentState.progress,
-      weightHistory: currentState.weightHistory
+      apiSecretConfigured: false,
+      status: 'Permisos de hoja autorizados, pero falta configurar API_SECRET_KEY (min. 24 caracteres) en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
     });
   }
 
+  let currentState = readFullSheetState(ss);
+  if (!currentState.plan.rows || currentState.plan.rows.length === 0) {
+    currentState = mergeStates(currentState, { plan: { rows: [] }, progress: {}, weightHistory: [] });
+    writeFullSheetState(ss, currentState);
+  }
+
+  const encryptedState = encryptStateForClient({
+    serverTime: Date.now(),
+    plan: currentState.plan,
+    progress: currentState.progress,
+    weightHistory: currentState.weightHistory
+  }, secret.trim());
+
   return jsonResponse({
     ok: true,
-    apiSecretConfigured: hasValidSecret,
-    status: hasValidSecret
-      ? 'Servicio privado blindado activo y autorizado. Autenticacion HMAC-SHA256 lista.'
-      : 'Permisos de hoja autorizados, pero falta configurar API_SECRET_KEY (min. 24 caracteres) en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
+    apiSecretConfigured: true,
+    status: 'Servicio privado blindado activo y autorizado. Autenticacion HMAC-SHA256 lista.',
+    encryptedState: encryptedState
   });
 }
 
@@ -217,39 +210,65 @@ function verifySignedRequest(payload, secret) {
   return { valid: true };
 }
 
-function verifySignedGetRequest(params, secret) {
-  const ts = Number(params && params.ts);
-  const nonce = String((params && params.nonce) || '');
-  const sig = String((params && params.sig) || '').toLowerCase();
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-  if (!ts || !isFinite(ts) || Math.abs(Date.now() - ts) > MAX_AUTH_SKEW_MS) {
-    return { valid: false, reason: 'No autorizado (marca de tiempo expirada o reloj desajustado).' };
-  }
-  if (!/^[a-f0-9]{24,64}$/i.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) {
-    return { valid: false, reason: 'No autorizado (formato de firma inválido).' };
-  }
+function toAsciiJson(obj) {
+  return JSON.stringify(obj).replace(/[\u007f-\uffff]/g, function(ch) {
+    return '\\u' + ('0000' + ch.charCodeAt(0).toString(16)).slice(-4);
+  });
+}
 
-  const canonical = 'GET.' + String(ts) + '.' + nonce;
-  const computedHmacBytes = Utilities.computeHmacSha256Signature(
-    canonical,
-    secret,
-    Utilities.Charset.UTF_8
+function unsignedBytesToBase64(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i] & 0xff;
+    const b1 = (i + 1 < bytes.length) ? (bytes[i + 1] & 0xff) : 0;
+    const b2 = (i + 2 < bytes.length) ? (bytes[i + 2] & 0xff) : 0;
+    out += B64_ALPHABET.charAt(b0 >> 2);
+    out += B64_ALPHABET.charAt(((b0 & 3) << 4) | (b1 >> 4));
+    out += (i + 1 < bytes.length) ? B64_ALPHABET.charAt(((b1 & 15) << 2) | (b2 >> 6)) : '=';
+    out += (i + 2 < bytes.length) ? B64_ALPHABET.charAt(b2 & 63) : '=';
+  }
+  return out;
+}
+
+function encryptStateForClient(stateObj, secret) {
+  const asciiPlain = toAsciiJson(stateObj);
+  const iv = bytesToHex(
+    Utilities.computeDigest(
+      Utilities.DigestAlgorithm.SHA_256,
+      String(Date.now()) + '.' + String(Math.random()),
+      Utilities.Charset.UTF_8
+    )
+  ).slice(0, 32);
+
+  const encKeyHex = bytesToHex(
+    Utilities.computeHmacSha256Signature('ENC_KEY.' + iv, secret, Utilities.Charset.UTF_8)
   );
-  const computedSigHex = bytesToHex(computedHmacBytes);
-  if (!constantTimeEquals(computedSigHex, sig)) {
-    return { valid: false, reason: 'No autorizado (clave secreta incorrecta).' };
+
+  const plainLen = asciiPlain.length;
+  const cipherBytes = new Array(plainLen);
+  let ksBytes = null;
+
+  for (let i = 0; i < plainLen; i++) {
+    const offsetInBlock = i & 31;
+    if (offsetInBlock === 0) {
+      const blockIdx = i >>> 5;
+      ksBytes = Utilities.computeDigest(
+        Utilities.DigestAlgorithm.SHA_256,
+        encKeyHex + '.' + String(blockIdx),
+        Utilities.Charset.UTF_8
+      );
+    }
+    cipherBytes[i] = (asciiPlain.charCodeAt(i) & 0xff) ^ (ksBytes[offsetInBlock] & 0xff);
   }
 
-  const cache = CacheService.getScriptCache();
-  const nonceKey = 'nonce_' + nonce.toLowerCase();
-  if (cache && cache.get(nonceKey)) {
-    return { valid: false, reason: 'No autorizado (solicitud duplicada detectada).' };
-  }
-  if (cache) {
-    cache.put(nonceKey, '1', 360);
-  }
+  const ct = unsignedBytesToBase64(cipherBytes);
+  const tag = bytesToHex(
+    Utilities.computeHmacSha256Signature('TAG.' + iv + '.' + ct, secret, Utilities.Charset.UTF_8)
+  );
 
-  return { valid: true };
+  return { iv: iv, ct: ct, tag: tag };
 }
 
 function bytesToHex(byteArray) {

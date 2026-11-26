@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-Kyar2gmN9hsf9+PyXOeYyQEJw8uJXMvOLSgDoYcWcr0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-2wn9PNwfZ0rI7bJGBExvQbgoC7fngYizHK9MzmVVZu8='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Mi Rutina">
@@ -4597,6 +4597,37 @@ function applyMergedCloudState(serverData) {
     saveSessionWeights();
   }
 
+  // 4. Vincular automáticamente pesos del Histórico_Pesos a su casilla de sesión correspondiente si la casilla estaba vacía
+  workoutData.forEach(row => {
+    ['A', 'B', 'C'].forEach(blockLetter => {
+      const col = `bloque_${blockLetter.toLowerCase()}`;
+      const list = parseExerciseBlock(row[col]);
+      list.forEach((item, idx) => {
+        const slotKey = getWeightSlotKey(row.semana, row.sesion, blockLetter, idx);
+        const existingSlot = sessionWeights[slotKey];
+        if (!existingSlot || (!existingSlot.weight && !existingSlot.deleted)) {
+          const matchEntry = weightHistory.find(e =>
+            !e.deleted &&
+            Number(e.cycleId || 1) === Number(currentCycleId) &&
+            String(e.week) === String(row.semana) &&
+            String(e.session) === String(row.sesion) &&
+            e.exerciseKey === item.exerciseKey &&
+            e.weight
+          );
+          if (matchEntry) {
+            sessionWeights[slotKey] = {
+              weight: matchEntry.weight,
+              historyId: matchEntry.id,
+              deleted: false,
+              updatedAt: Number(matchEntry.updatedAt || matchEntry.timestamp) || Date.now()
+            };
+          }
+        }
+      });
+    });
+  });
+  saveSessionWeights();
+
   // Si el día actual pasó a estar completado y el filtro de pendientes está activo, avanzar al siguiente pendiente
   if (hideCompleted && isDayCompleted(currentWeek, currentSession)) {
     const next = getNextPendingDay();
@@ -4647,19 +4678,35 @@ function hasLocalMutationsToPush() {
   );
 }
 
-async function buildSignedGetUrl(url, apiSecret) {
-  const ts = Date.now();
-  const nonce = generateRandomHex(16);
-  const canonical = `GET.${ts}.${nonce}`;
-  const sig = await hmacSha256Hex(apiSecret, canonical);
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}ts=${ts}&nonce=${nonce}&sig=${sig}`;
+async function decryptStateFromServer(encObj, apiSecret) {
+  if (!encObj || typeof encObj.iv !== 'string' || typeof encObj.ct !== 'string' || typeof encObj.tag !== 'string') {
+    throw new Error('Respuesta cifrada del servidor inválida.');
+  }
+  const expectedTag = await hmacSha256Hex(apiSecret, `TAG.${encObj.iv}.${encObj.ct}`);
+  if (expectedTag.toLowerCase() !== encObj.tag.toLowerCase()) {
+    throw new Error('No autorizado (la clave API_SECRET_KEY introducida no coincide con la guardada en Google Sheets).');
+  }
+
+  const encKeyHex = await hmacSha256Hex(apiSecret, `ENC_KEY.${encObj.iv}`);
+  const cipherBytes = base64ToBytes(encObj.ct);
+  const plainBytes = new Uint8Array(cipherBytes.length);
+  let ksBytes = null;
+
+  for (let i = 0; i < cipherBytes.length; i++) {
+    const offsetInBlock = i & 31;
+    if (offsetInBlock === 0) {
+      const blockIdx = i >>> 5;
+      ksBytes = sha256Pure(utf8Encode(`${encKeyHex}.${blockIdx}`));
+    }
+    plainBytes[i] = cipherBytes[i] ^ ksBytes[offsetInBlock];
+  }
+
+  return JSON.parse(utf8Decode(plainBytes));
 }
 
 async function sendSignedSyncRequest(url, apiSecret) {
-  // 1. Si hay datos o cambios locales que subir, enviamos POST firmado con HMAC-SHA256 a doPost(e).
-  // Nota: En navegadores donde la redirección 302 de POST lanza "Failed to fetch" tras haber actualizado el Excel,
-  // capturamos ese bloqueo CORS de lectura y pasamos al paso 2 (lectura GET firmada).
+  // 1. Si el navegador tiene datos o cambios locales (pesos, días completados, checks o Excel),
+  // los subimos primero mediante POST firmado con HMAC-SHA256 a doPost(e).
   if (hasLocalMutationsToPush()) {
     const fullPayload = buildClientSyncPayload({ includePlanRows: true });
     const postEnvelope = await buildSignedSyncEnvelope(apiSecret, fullPayload);
@@ -4672,7 +4719,10 @@ async function sendSignedSyncRequest(url, apiSecret) {
         body: postEnvelopeStr
       });
       if (postResp.ok) {
-        return await postResp.json();
+        const postData = await postResp.json();
+        if (postData && postData.ok && postData.plan) {
+          return postData;
+        }
       }
     } catch (postErr) {
       const msg = String(postErr && postErr.message ? postErr.message : postErr);
@@ -4682,22 +4732,12 @@ async function sendSignedSyncRequest(url, apiSecret) {
     }
   }
 
-  // 2. Lectura y verificación por GET con parámetros alfanuméricos limpios (?ts=...&nonce=...&sig=...)
-  // que nunca superan los 150 caracteres ni disparan filtros de URL larga en modo incógnito.
-  let getResp;
-  try {
-    const signedGetUrl = await buildSignedGetUrl(url, apiSecret);
-    getResp = await fetch(signedGetUrl, {
-      method: 'GET',
-      redirect: 'follow'
-    });
-  } catch (_) {
-    // Respaldo inmediato a la URL base si el navegador o script antiguo bloquea parámetros
-    getResp = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow'
-    });
-  }
+  // 2. Descargar el estado completo desde la URL base limpia (GET sin parámetros en la URL,
+  // que siempre devuelve HTTP 200 tanto en navegador normal como en Modo Incógnito) y descifrarlo en RAM.
+  const getResp = await fetch(url, {
+    method: 'GET',
+    redirect: 'follow'
+  });
 
   if (!getResp.ok) {
     throw new Error(`HTTP ${getResp.status}`);
@@ -4707,6 +4747,18 @@ async function sendSignedSyncRequest(url, apiSecret) {
   if (getData && getData.ok && getData.apiSecretConfigured === false) {
     throw new Error(getData.status || 'Falta configurar API_SECRET_KEY en Propiedades de secuencia de comandos.');
   }
+
+  if (getData && getData.ok && getData.encryptedState) {
+    const decrypted = await decryptStateFromServer(getData.encryptedState, apiSecret);
+    return {
+      ok: true,
+      serverTime: decrypted.serverTime || Date.now(),
+      plan: decrypted.plan,
+      progress: decrypted.progress,
+      weightHistory: decrypted.weightHistory
+    };
+  }
+
   return getData;
 }
 
@@ -4814,38 +4866,32 @@ function doGet(e) {
   const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
   const hasValidSecret = Boolean(secret && secret.trim().length >= 24);
 
-  if (typeof params.sig === 'string' && params.sig.length > 0) {
-    if (!hasValidSecret) {
-      return jsonResponse({
-        ok: false,
-        error: 'Falta configurar API_SECRET_KEY en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
-      });
-    }
-    const authCheck = verifySignedGetRequest(params, secret.trim());
-    if (!authCheck.valid) {
-      return jsonResponse({ ok: false, error: authCheck.reason });
-    }
-    let currentState = readFullSheetState(ss);
-    if (!currentState.plan.rows || currentState.plan.rows.length === 0) {
-      currentState = mergeStates(currentState, { plan: { rows: [] }, progress: {}, weightHistory: [] });
-      writeFullSheetState(ss, currentState);
-    }
+  if (!hasValidSecret) {
     return jsonResponse({
       ok: true,
-      apiSecretConfigured: true,
-      serverTime: Date.now(),
-      plan: currentState.plan,
-      progress: currentState.progress,
-      weightHistory: currentState.weightHistory
+      apiSecretConfigured: false,
+      status: 'Permisos de hoja autorizados, pero falta configurar API_SECRET_KEY (min. 24 caracteres) en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
     });
   }
 
+  let currentState = readFullSheetState(ss);
+  if (!currentState.plan.rows || currentState.plan.rows.length === 0) {
+    currentState = mergeStates(currentState, { plan: { rows: [] }, progress: {}, weightHistory: [] });
+    writeFullSheetState(ss, currentState);
+  }
+
+  const encryptedState = encryptStateForClient({
+    serverTime: Date.now(),
+    plan: currentState.plan,
+    progress: currentState.progress,
+    weightHistory: currentState.weightHistory
+  }, secret.trim());
+
   return jsonResponse({
     ok: true,
-    apiSecretConfigured: hasValidSecret,
-    status: hasValidSecret
-      ? 'Servicio privado blindado activo y autorizado. Autenticacion HMAC-SHA256 lista.'
-      : 'Permisos de hoja autorizados, pero falta configurar API_SECRET_KEY (min. 24 caracteres) en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
+    apiSecretConfigured: true,
+    status: 'Servicio privado blindado activo y autorizado. Autenticacion HMAC-SHA256 lista.',
+    encryptedState: encryptedState
   });
 }
 
@@ -4955,34 +5001,65 @@ function verifySignedRequest(payload, secret) {
   return { valid: true };
 }
 
-function verifySignedGetRequest(params, secret) {
-  const ts = Number(params && params.ts);
-  const nonce = String((params && params.nonce) || '');
-  const sig = String((params && params.sig) || '').toLowerCase();
+const B64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-  if (!ts || !isFinite(ts) || Math.abs(Date.now() - ts) > MAX_AUTH_SKEW_MS) {
-    return { valid: false, reason: 'No autorizado (marca de tiempo expirada o reloj desajustado).' };
-  }
-  if (!/^[a-f0-9]{24,64}$/i.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) {
-    return { valid: false, reason: 'No autorizado (formato de firma invalido).' };
-  }
+function toAsciiJson(obj) {
+  return JSON.stringify(obj).replace(/[\\u007f-\\uffff]/g, function(ch) {
+    return '\\\\u' + ('0000' + ch.charCodeAt(0).toString(16)).slice(-4);
+  });
+}
 
-  const canonical = 'GET.' + String(ts) + '.' + nonce;
-  const computedSigHex = bytesToHex(
-    Utilities.computeHmacSha256Signature(canonical, secret, Utilities.Charset.UTF_8)
+function unsignedBytesToBase64(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i] & 0xff;
+    const b1 = (i + 1 < bytes.length) ? (bytes[i + 1] & 0xff) : 0;
+    const b2 = (i + 2 < bytes.length) ? (bytes[i + 2] & 0xff) : 0;
+    out += B64_ALPHABET.charAt(b0 >> 2);
+    out += B64_ALPHABET.charAt(((b0 & 3) << 4) | (b1 >> 4));
+    out += (i + 1 < bytes.length) ? B64_ALPHABET.charAt(((b1 & 15) << 2) | (b2 >> 6)) : '=';
+    out += (i + 2 < bytes.length) ? B64_ALPHABET.charAt(b2 & 63) : '=';
+  }
+  return out;
+}
+
+function encryptStateForClient(stateObj, secret) {
+  const asciiPlain = toAsciiJson(stateObj);
+  const iv = bytesToHex(
+    Utilities.computeDigest(
+      Utilities.DigestAlgorithm.SHA_256,
+      String(Date.now()) + '.' + String(Math.random()),
+      Utilities.Charset.UTF_8
+    )
+  ).slice(0, 32);
+
+  const encKeyHex = bytesToHex(
+    Utilities.computeHmacSha256Signature('ENC_KEY.' + iv, secret, Utilities.Charset.UTF_8)
   );
-  if (!constantTimeEquals(computedSigHex, sig)) {
-    return { valid: false, reason: 'No autorizado (clave secreta incorrecta).' };
+
+  const plainLen = asciiPlain.length;
+  const cipherBytes = new Array(plainLen);
+  let ksBytes = null;
+
+  for (let i = 0; i < plainLen; i++) {
+    const offsetInBlock = i & 31;
+    if (offsetInBlock === 0) {
+      const blockIdx = i >>> 5;
+      ksBytes = Utilities.computeDigest(
+        Utilities.DigestAlgorithm.SHA_256,
+        encKeyHex + '.' + String(blockIdx),
+        Utilities.Charset.UTF_8
+      );
+    }
+    cipherBytes[i] = (asciiPlain.charCodeAt(i) & 0xff) ^ (ksBytes[offsetInBlock] & 0xff);
   }
 
-  const cache = CacheService.getScriptCache();
-  const nonceKey = 'nonce_' + nonce.toLowerCase();
-  if (cache && cache.get(nonceKey)) {
-    return { valid: false, reason: 'No autorizado (solicitud duplicada detectada).' };
-  }
-  if (cache) cache.put(nonceKey, '1', 360);
+  const ct = unsignedBytesToBase64(cipherBytes);
+  const tag = bytesToHex(
+    Utilities.computeHmacSha256Signature('TAG.' + iv + '.' + ct, secret, Utilities.Charset.UTF_8)
+  );
 
-  return { valid: true };
+  return { iv: iv, ct: ct, tag: tag };
 }
 
 function bytesToHex(byteArray) {
