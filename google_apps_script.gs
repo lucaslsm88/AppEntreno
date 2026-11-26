@@ -413,6 +413,7 @@ function sanitizeClientState(raw) {
   const outProg = {
     cycleId: Math.max(1, parseInt(rawProg.cycleId, 10) || 1),
     cycleUpdatedAt: Math.max(0, Number(rawProg.cycleUpdatedAt) || 0),
+    resetAt: Math.max(0, Number(rawProg.resetAt) || 0),
     completedDays: sanitizeRecordMap(rawProg.completedDays, 500),
     completedChecks: sanitizeRecordMap(rawProg.completedChecks, 2500),
     sessionWeights: sanitizeRecordMap(rawProg.sessionWeights, 2500)
@@ -428,7 +429,12 @@ function sanitizeRecordMap(obj, maxKeys) {
   keys.forEach(k => {
     const cleanKey = sanitizeSheetCellText(k, 120);
     const val = obj[k];
-    if (cleanKey && val && typeof val === 'object') {
+    if (!cleanKey || val === null || val === undefined) return;
+    if (typeof val === 'boolean') {
+      out[cleanKey] = { completed: val, checked: val, timestamp: 1, updatedAt: 1 };
+      return;
+    }
+    if (typeof val === 'object') {
       const item = {};
       if ('completed' in val) item.completed = Boolean(val.completed);
       if ('checked' in val) item.checked = Boolean(val.checked);
@@ -436,7 +442,7 @@ function sanitizeRecordMap(obj, maxKeys) {
       if ('weight' in val) item.weight = sanitizeSheetCellText(val.weight, 80);
       if ('historyId' in val) item.historyId = val.historyId ? sanitizeSheetCellText(val.historyId, 80) : null;
       if ('timestamp' in val) item.timestamp = Math.max(0, Number(val.timestamp) || 0);
-      if ('updatedAt' in val) item.updatedAt = Math.max(0, Number(val.updatedAt) || 0);
+      if ('updatedAt' in val) item.updatedAt = Math.max(0, Number(val.updatedAt || val.timestamp) || 1);
       out[cleanKey] = item;
     }
   });
@@ -451,7 +457,7 @@ function jsonResponse(obj) {
 
 function ensureSheetsExist(ss) {
   const defs = [
-    [SHEET_PLAN, ['Semana', 'Sesion', 'Bloque A', 'Bloque B', 'Bloque C', 'RPE']],
+    [SHEET_PLAN, ['Semana', 'Sesion', 'Bloque A', 'Bloque B', 'Bloque C', 'RPE', 'Completado']],
     [SHEET_HISTORY, [
       'Fecha', 'Ejercicio_Normalizado', 'Peso', 'Semana', 'Sesion',
       'Prescripcion_Original', 'Ciclo', 'Timestamp_MS', 'UpdatedAt_MS', 'ID_Registro', 'Eliminado'
@@ -465,6 +471,12 @@ function ensureSheetsExist(ss) {
     if (sh.getLastRow() === 0) {
       sh.appendRow(headers);
       sh.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+    } else if (name === SHEET_PLAN) {
+      const col7 = String(sh.getRange(1, 7, 1, 1).getValues()[0][0] || '').trim();
+      if (!col7) {
+        sh.getRange(1, 7, 1, 1).setValues([['Completado']]);
+        sh.getRange(1, 7, 1, 1).setFontWeight('bold');
+      }
     }
   });
 }
@@ -488,20 +500,27 @@ function readFullSheetState(ss) {
 
   const planSheet = ss.getSheetByName(SHEET_PLAN);
   const planRows = [];
+  const planCompletedFromCol = {};
   if (planSheet && planSheet.getLastRow() > 1) {
-    const raw = planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 6).getValues();
+    const raw = planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 7).getValues();
     raw.forEach(r => {
       const sem = fromSafeSheetCell(r[0]).trim();
       const ses = fromSafeSheetCell(r[1]).trim();
       if (!sem && !ses) return;
+      const cleanSem = sanitizeSheetCellText(sem, 40) || '1';
+      const cleanSes = sanitizeSheetCellText(ses, 60) || 'Dia 1';
       planRows.push({
-        semana: sanitizeSheetCellText(sem, 40) || '1',
-        sesion: sanitizeSheetCellText(ses, 60) || 'Dia 1',
+        semana: cleanSem,
+        sesion: cleanSes,
         bloque_a: sanitizeSheetCellText(fromSafeSheetCell(r[2]), 800),
         bloque_b: sanitizeSheetCellText(fromSafeSheetCell(r[3]), 800),
         bloque_c: sanitizeSheetCellText(fromSafeSheetCell(r[4]), 800),
         rpe: sanitizeSheetCellText(fromSafeSheetCell(r[5]), 20) || '-'
       });
+      const doneCell = fromSafeSheetCell(r[6]).trim().toUpperCase();
+      if (doneCell === 'SI' || doneCell === 'SÍ' || doneCell === 'TRUE' || doneCell === '1' || doneCell === '✓') {
+        planCompletedFromCol[cleanSem + '__' + cleanSes] = { completed: true, timestamp: 1, updatedAt: 1 };
+      }
     });
   }
 
@@ -550,12 +569,14 @@ function readFullSheetState(ss) {
   }
 
   const progressData = (metaMap['progress_state'] && metaMap['progress_state'].value) || {};
+  const mergedDaysFromSheet = mergeMapByUpdatedAt(planCompletedFromCol, progressData.completedDays || {});
   return {
     plan: { updatedAt: planUpdatedAt, isCustomData: planIsCustom, rows: planRows },
     progress: {
       cycleId: Number(progressData.cycleId) || 1,
       cycleUpdatedAt: Number(progressData.cycleUpdatedAt) || 0,
-      completedDays: progressData.completedDays || {},
+      resetAt: Number(progressData.resetAt) || 0,
+      completedDays: mergedDaysFromSheet,
       completedChecks: progressData.completedChecks || {},
       sessionWeights: progressData.sessionWeights || {}
     },
@@ -605,34 +626,35 @@ function mergeStates(serverState, clientState) {
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
     .slice(0, MAX_HISTORY_ROWS);
 
-  const sProg = serverState.progress || { cycleId: 1, cycleUpdatedAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
-  const cProg = (clientState && clientState.progress) || { cycleId: 1, cycleUpdatedAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
+  const sProg = serverState.progress || { cycleId: 1, cycleUpdatedAt: 0, resetAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
+  const cProg = (clientState && clientState.progress) || { cycleId: 1, cycleUpdatedAt: 0, resetAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
 
   const sCycle = Number(sProg.cycleId) || 1;
   const cCycle = Number(cProg.cycleId) || 1;
+  const effectiveResetAt = Math.max(Number(sProg.resetAt) || 0, Number(cProg.resetAt) || 0);
 
-  let mergedProgress;
-  if (cCycle > sCycle) {
-    mergedProgress = {
-      cycleId: cCycle,
-      cycleUpdatedAt: Number(cProg.cycleUpdatedAt) || Date.now(),
-      completedDays: cProg.completedDays || {},
-      completedChecks: cProg.completedChecks || {},
-      sessionWeights: cProg.sessionWeights || {}
-    };
-  } else if (sCycle > cCycle) {
-    mergedProgress = sProg;
-  } else {
-    mergedProgress = {
-      cycleId: sCycle,
-      cycleUpdatedAt: Math.max(Number(sProg.cycleUpdatedAt) || 0, Number(cProg.cycleUpdatedAt) || 0),
-      completedDays: mergeMapByUpdatedAt(sProg.completedDays, cProg.completedDays),
-      completedChecks: mergeMapByUpdatedAt(sProg.completedChecks, cProg.completedChecks),
-      sessionWeights: mergeMapByUpdatedAt(sProg.sessionWeights, cProg.sessionWeights)
-    };
-  }
+  const mergedProgress = {
+    cycleId: Math.max(sCycle, cCycle),
+    cycleUpdatedAt: Math.max(Number(sProg.cycleUpdatedAt) || 0, Number(cProg.cycleUpdatedAt) || 0),
+    resetAt: effectiveResetAt,
+    completedDays: filterByResetAt(mergeMapByUpdatedAt(sProg.completedDays, cProg.completedDays), effectiveResetAt),
+    completedChecks: filterByResetAt(mergeMapByUpdatedAt(sProg.completedChecks, cProg.completedChecks), effectiveResetAt),
+    sessionWeights: filterByResetAt(mergeMapByUpdatedAt(sProg.sessionWeights, cProg.sessionWeights), effectiveResetAt)
+  };
 
   return { plan: mergedPlan, progress: mergedProgress, weightHistory: mergedHistory };
+}
+
+function filterByResetAt(mapObj, resetAt) {
+  if (!mapObj || typeof mapObj !== 'object') return {};
+  if (!resetAt || resetAt <= 0) return mapObj;
+  const out = {};
+  Object.keys(mapObj).forEach(k => {
+    const v = mapObj[k];
+    const t = (v && typeof v === 'object') ? (Number(v.updatedAt || v.timestamp) || 0) : 0;
+    if (t >= resetAt) out[k] = v;
+  });
+  return out;
 }
 
 function mergeMapByUpdatedAt(serverMap, clientMap) {
@@ -653,22 +675,28 @@ function mergeMapByUpdatedAt(serverMap, clientMap) {
 }
 
 function writeFullSheetState(ss, state) {
-  // 1. Escribir Planificacion con formato texto plano seguro (@)
+  // 1. Escribir Planificacion con formato texto plano seguro (@) + columna Completado (SI / vacío)
   const planSheet = ss.getSheetByName(SHEET_PLAN);
   if (planSheet.getLastRow() > 1) {
-    planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 6).clearContent();
+    planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 7).clearContent();
   }
   const planRows = (state.plan && state.plan.rows) || [];
+  const daysMap = (state.progress && state.progress.completedDays) || {};
   if (planRows.length > 0) {
-    const planMatrix = planRows.map(r => [
-      toSafeSheetCell(r.semana, 40),
-      toSafeSheetCell(r.sesion, 60),
-      toSafeSheetCell(r.bloque_a, 800),
-      toSafeSheetCell(r.bloque_b, 800),
-      toSafeSheetCell(r.bloque_c, 800),
-      toSafeSheetCell(r.rpe, 20)
-    ]);
-    const range = planSheet.getRange(2, 1, planMatrix.length, 6);
+    const planMatrix = planRows.map(r => {
+      const dKey = String(r.semana || '').trim() + '__' + String(r.sesion || '').trim();
+      const isDone = Boolean(daysMap[dKey] && daysMap[dKey].completed);
+      return [
+        toSafeSheetCell(r.semana, 40),
+        toSafeSheetCell(r.sesion, 60),
+        toSafeSheetCell(r.bloque_a, 800),
+        toSafeSheetCell(r.bloque_b, 800),
+        toSafeSheetCell(r.bloque_c, 800),
+        toSafeSheetCell(r.rpe, 20),
+        isDone ? 'SI' : ''
+      ];
+    });
+    const range = planSheet.getRange(2, 1, planMatrix.length, 7);
     range.setNumberFormat('@');
     range.setValues(planMatrix);
   }

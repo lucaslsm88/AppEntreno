@@ -11,6 +11,7 @@ const STORAGE_KEY_COMPLETED_DAYS = 'gym_workout_completed_days';
 const STORAGE_KEY_HIDE_COMPLETED = 'gym_workout_hide_completed';
 const STORAGE_KEY_CYCLE_ID = 'gym_workout_cycle_id';
 const STORAGE_KEY_CYCLE_UPDATED_AT = 'gym_workout_cycle_updated_at';
+const STORAGE_KEY_PROGRESS_RESET_AT = 'gym_workout_progress_reset_at';
 const STORAGE_KEY_PLAN_UPDATED_AT = 'gym_workout_plan_updated_at';
 const STORAGE_KEY_SESSION_WEIGHTS = 'gym_workout_session_weights';
 const STORAGE_KEY_WEIGHT_HISTORY = 'gym_workout_weight_history';
@@ -62,6 +63,7 @@ let completedDays = {};
 let hideCompleted = true;
 let currentCycleId = 1;
 let cycleUpdatedAt = 0;
+let progressResetAt = 0;
 let sessionWeights = {};
 let weightHistory = [];
 let activeView = 'workout';
@@ -257,7 +259,21 @@ function loadStoredData() {
 
     const savedCompletedDays = localStorage.getItem(STORAGE_KEY_COMPLETED_DAYS);
     if (savedCompletedDays) {
-      completedDays = JSON.parse(savedCompletedDays);
+      const rawDays = JSON.parse(savedCompletedDays) || {};
+      completedDays = {};
+      Object.keys(rawDays).forEach(k => {
+        const v = rawDays[k];
+        if (typeof v === 'boolean') {
+          completedDays[k] = { completed: v, timestamp: 1, updatedAt: 1 };
+        } else if (v && typeof v === 'object') {
+          const ts = Number(v.timestamp) || 1;
+          completedDays[k] = {
+            completed: Boolean(v.completed),
+            timestamp: ts,
+            updatedAt: Number(v.updatedAt) || ts
+          };
+        }
+      });
     }
 
     const savedHideCompleted = localStorage.getItem(STORAGE_KEY_HIDE_COMPLETED);
@@ -283,6 +299,11 @@ function loadStoredData() {
     const savedCycleUpdatedAt = localStorage.getItem(STORAGE_KEY_CYCLE_UPDATED_AT);
     if (savedCycleUpdatedAt) {
       cycleUpdatedAt = parseInt(savedCycleUpdatedAt, 10) || 0;
+    }
+
+    const savedResetAt = localStorage.getItem(STORAGE_KEY_PROGRESS_RESET_AT);
+    if (savedResetAt) {
+      progressResetAt = parseInt(savedResetAt, 10) || 0;
     }
 
     const savedSessionWeights = localStorage.getItem(STORAGE_KEY_SESSION_WEIGHTS);
@@ -775,6 +796,8 @@ function setupEventListeners() {
   // Reiniciar días completados (conservando el histórico de pesos de 3 meses)
   const handleResetCompletedDays = () => {
     if (confirm('¿Deseas reiniciar todos los días completados y volver a empezar tu plan? (Tu histórico de pesos de los últimos 3 meses se conservará).')) {
+      progressResetAt = Date.now();
+      localStorage.setItem(STORAGE_KEY_PROGRESS_RESET_AT, String(progressResetAt));
       completedDays = {};
       localStorage.removeItem(STORAGE_KEY_COMPLETED_DAYS);
       completedChecks = {};
@@ -2674,6 +2697,7 @@ function buildClientSyncPayload(options = { includePlanRows: true }) {
     progress: {
       cycleId: currentCycleId,
       cycleUpdatedAt: cycleUpdatedAt || 0,
+      resetAt: progressResetAt || 0,
       completedDays: completedDays,
       completedChecks: checksMeta,
       sessionWeights: sessionWeights
@@ -2771,24 +2795,42 @@ function applyMergedCloudState(serverData) {
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   saveWeightHistory();
 
-  // 3. Progreso Actual (Ciclo, Días completados, Checks y Pesos de la sesión activa)
+function filterLocalMapByResetAt(mapObj, resetAt) {
+  if (!mapObj || typeof mapObj !== 'object') return {};
+  if (!resetAt || resetAt <= 0) return mapObj;
+  const out = {};
+  Object.keys(mapObj).forEach(k => {
+    const v = mapObj[k];
+    const t = (v && typeof v === 'object') ? (Number(v.updatedAt || v.timestamp) || 0) : 0;
+    if (t >= resetAt) out[k] = v;
+  });
+  return out;
+}
+
+  // 3. Progreso Actual (fusión aditiva por fecha sin perder días completados entre distintos ciclos/navegadores)
   const sProg = serverData.progress;
   if (sProg && typeof sProg === 'object') {
     const sCycle = Number(sProg.cycleId) || 1;
     const sCycleTime = Number(sProg.cycleUpdatedAt) || 0;
+    const sResetAt = Number(sProg.resetAt) || 0;
+    const effectiveResetAt = Math.max(progressResetAt || 0, sResetAt);
 
-    if (sCycle > currentCycleId) {
-      currentCycleId = sCycle;
-      cycleUpdatedAt = sCycleTime;
-      completedDays = sProg.completedDays || {};
-      checksMeta = sProg.completedChecks || {};
-      sessionWeights = sProg.sessionWeights || {};
-    } else if (sCycle === currentCycleId) {
-      cycleUpdatedAt = Math.max(cycleUpdatedAt || 0, sCycleTime);
-      completedDays = mergeKeyMapByUpdatedAt(completedDays, sProg.completedDays);
-      checksMeta = mergeKeyMapByUpdatedAt(checksMeta, sProg.completedChecks);
-      sessionWeights = mergeKeyMapByUpdatedAt(sessionWeights, sProg.sessionWeights);
-    }
+    currentCycleId = Math.max(currentCycleId || 1, sCycle);
+    cycleUpdatedAt = Math.max(cycleUpdatedAt || 0, sCycleTime);
+    progressResetAt = effectiveResetAt;
+
+    completedDays = filterLocalMapByResetAt(
+      mergeKeyMapByUpdatedAt(completedDays, sProg.completedDays),
+      effectiveResetAt
+    );
+    checksMeta = filterLocalMapByResetAt(
+      mergeKeyMapByUpdatedAt(checksMeta, sProg.completedChecks),
+      effectiveResetAt
+    );
+    sessionWeights = filterLocalMapByResetAt(
+      mergeKeyMapByUpdatedAt(sessionWeights, sProg.sessionWeights),
+      effectiveResetAt
+    );
 
     // Reconstruir completedChecks activo a partir de checksMeta
     completedChecks = {};
@@ -2800,12 +2842,13 @@ function applyMergedCloudState(serverData) {
 
     localStorage.setItem(STORAGE_KEY_CYCLE_ID, String(currentCycleId));
     localStorage.setItem(STORAGE_KEY_CYCLE_UPDATED_AT, String(cycleUpdatedAt));
+    localStorage.setItem(STORAGE_KEY_PROGRESS_RESET_AT, String(progressResetAt));
     localStorage.setItem(STORAGE_KEY_COMPLETED_DAYS, JSON.stringify(completedDays));
     saveChecks();
     saveSessionWeights();
   }
 
-  // 4. Vincular automáticamente pesos del Histórico_Pesos a su casilla de sesión correspondiente si la casilla estaba vacía
+  // 4. Vincular automáticamente pesos del Histórico_Pesos a su casilla de sesión correspondiente (sin bloqueo por cycleId)
   workoutData.forEach(row => {
     ['A', 'B', 'C'].forEach(blockLetter => {
       const col = `bloque_${blockLetter.toLowerCase()}`;
@@ -2816,9 +2859,8 @@ function applyMergedCloudState(serverData) {
         if (!existingSlot || (!existingSlot.weight && !existingSlot.deleted)) {
           const matchEntry = weightHistory.find(e =>
             !e.deleted &&
-            Number(e.cycleId || 1) === Number(currentCycleId) &&
-            String(e.week) === String(row.semana) &&
-            String(e.session) === String(row.sesion) &&
+            String(e.week).trim() === String(row.semana).trim() &&
+            String(e.session).trim() === String(row.sesion).trim() &&
             e.exerciseKey === item.exerciseKey &&
             e.weight
           );
@@ -3415,6 +3457,7 @@ function sanitizeClientState(raw) {
     progress: {
       cycleId: Math.max(1, parseInt(rawProg.cycleId, 10) || 1),
       cycleUpdatedAt: Math.max(0, Number(rawProg.cycleUpdatedAt) || 0),
+      resetAt: Math.max(0, Number(rawProg.resetAt) || 0),
       completedDays: sanitizeRecordMap(rawProg.completedDays, 500),
       completedChecks: sanitizeRecordMap(rawProg.completedChecks, 2500),
       sessionWeights: sanitizeRecordMap(rawProg.sessionWeights, 2500)
@@ -3429,7 +3472,12 @@ function sanitizeRecordMap(obj, maxKeys) {
   Object.keys(obj).slice(0, maxKeys).forEach(k => {
     const cleanKey = sanitizeSheetCellText(k, 120);
     const val = obj[k];
-    if (cleanKey && val && typeof val === 'object') {
+    if (!cleanKey || val === null || val === undefined) return;
+    if (typeof val === 'boolean') {
+      out[cleanKey] = { completed: val, checked: val, timestamp: 1, updatedAt: 1 };
+      return;
+    }
+    if (typeof val === 'object') {
       const item = {};
       if ('completed' in val) item.completed = Boolean(val.completed);
       if ('checked' in val) item.checked = Boolean(val.checked);
@@ -3437,7 +3485,7 @@ function sanitizeRecordMap(obj, maxKeys) {
       if ('weight' in val) item.weight = sanitizeSheetCellText(val.weight, 80);
       if ('historyId' in val) item.historyId = val.historyId ? sanitizeSheetCellText(val.historyId, 80) : null;
       if ('timestamp' in val) item.timestamp = Math.max(0, Number(val.timestamp) || 0);
-      if ('updatedAt' in val) item.updatedAt = Math.max(0, Number(val.updatedAt) || 0);
+      if ('updatedAt' in val) item.updatedAt = Math.max(0, Number(val.updatedAt || val.timestamp) || 1);
       out[cleanKey] = item;
     }
   });
@@ -3450,7 +3498,7 @@ function jsonResponse(obj) {
 
 function ensureSheetsExist(ss) {
   const defs = [
-    [SHEET_PLAN, ['Semana', 'Sesion', 'Bloque A', 'Bloque B', 'Bloque C', 'RPE']],
+    [SHEET_PLAN, ['Semana', 'Sesion', 'Bloque A', 'Bloque B', 'Bloque C', 'RPE', 'Completado']],
     [SHEET_HISTORY, ['Fecha', 'Ejercicio_Normalizado', 'Peso', 'Semana', 'Sesion', 'Prescripcion_Original', 'Ciclo', 'Timestamp_MS', 'UpdatedAt_MS', 'ID_Registro', 'Eliminado']],
     [SHEET_PROGRESS, ['Clave', 'Valor_JSON', 'Actualizado_MS']]
   ];
@@ -3460,6 +3508,12 @@ function ensureSheetsExist(ss) {
     if (sh.getLastRow() === 0) {
       sh.appendRow(headers);
       sh.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+    } else if (name === SHEET_PLAN) {
+      const col7 = String(sh.getRange(1, 7, 1, 1).getValues()[0][0] || '').trim();
+      if (!col7) {
+        sh.getRange(1, 7, 1, 1).setValues([['Completado']]);
+        sh.getRange(1, 7, 1, 1).setFontWeight('bold');
+      }
     }
   });
 }
@@ -3476,19 +3530,26 @@ function readFullSheetState(ss) {
   }
   const planSheet = ss.getSheetByName(SHEET_PLAN);
   const planRows = [];
+  const planDoneMap = {};
   if (planSheet && planSheet.getLastRow() > 1) {
-    planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 6).getValues().forEach(r => {
+    planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 7).getValues().forEach(r => {
       const sem = fromSafeSheetCell(r[0]).trim();
       const ses = fromSafeSheetCell(r[1]).trim();
       if (!sem && !ses) return;
+      const cSem = sanitizeSheetCellText(sem, 40) || '1';
+      const cSes = sanitizeSheetCellText(ses, 60) || 'Dia 1';
       planRows.push({
-        semana: sanitizeSheetCellText(sem, 40) || '1',
-        sesion: sanitizeSheetCellText(ses, 60) || 'Dia 1',
+        semana: cSem,
+        sesion: cSes,
         bloque_a: sanitizeSheetCellText(fromSafeSheetCell(r[2]), 800),
         bloque_b: sanitizeSheetCellText(fromSafeSheetCell(r[3]), 800),
         bloque_c: sanitizeSheetCellText(fromSafeSheetCell(r[4]), 800),
         rpe: sanitizeSheetCellText(fromSafeSheetCell(r[5]), 20) || '-'
       });
+      const doneRaw = fromSafeSheetCell(r[6]).trim().toUpperCase();
+      if (doneRaw === 'SI' || doneRaw === 'SÍ' || doneRaw === 'TRUE' || doneRaw === '1' || doneRaw === '✓') {
+        planDoneMap[cSem + '__' + cSes] = { completed: true, timestamp: 1, updatedAt: 1 };
+      }
     });
   }
   const planMeta = (metaMap['plan_meta'] && metaMap['plan_meta'].value) || { updatedAt: 0, isCustomData: false, signature: '' };
@@ -3524,7 +3585,7 @@ function readFullSheetState(ss) {
   const pData = (metaMap['progress_state'] && metaMap['progress_state'].value) || {};
   return {
     plan: { updatedAt: planUpdatedAt, isCustomData: planIsCustom, rows: planRows },
-    progress: { cycleId: Number(pData.cycleId) || 1, cycleUpdatedAt: Number(pData.cycleUpdatedAt) || 0, completedDays: pData.completedDays || {}, completedChecks: pData.completedChecks || {}, sessionWeights: pData.sessionWeights || {} },
+    progress: { cycleId: Number(pData.cycleId) || 1, cycleUpdatedAt: Number(pData.cycleUpdatedAt) || 0, resetAt: Number(pData.resetAt) || 0, completedDays: mergeMap(planDoneMap, pData.completedDays || {}), completedChecks: pData.completedChecks || {}, sessionWeights: pData.sessionWeights || {} },
     weightHistory: weightHistory
   };
 }
@@ -3549,17 +3610,34 @@ function mergeStates(serverState, clientState) {
     const sT = ex ? (Number(ex.updatedAt || ex.timestamp) || 0) : -1;
     if (!ex || cT >= sT) hMap[c.id] = c;
   });
-  const sProg = serverState.progress || { cycleId: 1, cycleUpdatedAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
-  const cProg = (clientState && clientState.progress) || { cycleId: 1, cycleUpdatedAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
+  const sProg = serverState.progress || { cycleId: 1, cycleUpdatedAt: 0, resetAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
+  const cProg = (clientState && clientState.progress) || { cycleId: 1, cycleUpdatedAt: 0, resetAt: 0, completedDays: {}, completedChecks: {}, sessionWeights: {} };
   const sC = Number(sProg.cycleId) || 1, cC = Number(cProg.cycleId) || 1;
-  let mergedProg = sC === cC
-    ? { cycleId: sC, cycleUpdatedAt: Math.max(Number(sProg.cycleUpdatedAt) || 0, Number(cProg.cycleUpdatedAt) || 0), completedDays: mergeMap(sProg.completedDays, cProg.completedDays), completedChecks: mergeMap(sProg.completedChecks, cProg.completedChecks), sessionWeights: mergeMap(sProg.sessionWeights, cProg.sessionWeights) }
-    : (cC > sC ? { cycleId: cC, cycleUpdatedAt: Number(cProg.cycleUpdatedAt) || Date.now(), completedDays: cProg.completedDays || {}, completedChecks: cProg.completedChecks || {}, sessionWeights: cProg.sessionWeights || {} } : sProg);
+  const effReset = Math.max(Number(sProg.resetAt) || 0, Number(cProg.resetAt) || 0);
+  const mergedProg = {
+    cycleId: Math.max(sC, cC),
+    cycleUpdatedAt: Math.max(Number(sProg.cycleUpdatedAt) || 0, Number(cProg.cycleUpdatedAt) || 0),
+    resetAt: effReset,
+    completedDays: filterReset(mergeMap(sProg.completedDays, cProg.completedDays), effReset),
+    completedChecks: filterReset(mergeMap(sProg.completedChecks, cProg.completedChecks), effReset),
+    sessionWeights: filterReset(mergeMap(sProg.sessionWeights, cProg.sessionWeights), effReset)
+  };
   return {
     plan: mergedPlan,
     progress: mergedProg,
     weightHistory: Object.keys(hMap).map(k => hMap[k]).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, MAX_HISTORY_ROWS)
   };
+}
+
+function filterReset(m, rAt) {
+  if (!m || typeof m !== 'object') return {};
+  if (!rAt || rAt <= 0) return m;
+  const out = {};
+  Object.keys(m).forEach(k => {
+    const v = m[k];
+    if (((Number(v && (v.updatedAt || v.timestamp)) || 0)) >= rAt) out[k] = v;
+  });
+  return out;
 }
 
 function mergeMap(sMap, cMap) {
@@ -3573,11 +3651,15 @@ function mergeMap(sMap, cMap) {
 
 function writeFullSheetState(ss, state) {
   const planSheet = ss.getSheetByName(SHEET_PLAN);
-  if (planSheet.getLastRow() > 1) planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 6).clearContent();
+  if (planSheet.getLastRow() > 1) planSheet.getRange(2, 1, planSheet.getLastRow() - 1, 7).clearContent();
   const pRows = (state.plan && state.plan.rows) || [];
+  const dMap = (state.progress && state.progress.completedDays) || {};
   if (pRows.length > 0) {
-    const pMatrix = pRows.map(r => [toSafeSheetCell(r.semana, 40), toSafeSheetCell(r.sesion, 60), toSafeSheetCell(r.bloque_a, 800), toSafeSheetCell(r.bloque_b, 800), toSafeSheetCell(r.bloque_c, 800), toSafeSheetCell(r.rpe, 20)]);
-    const pRange = planSheet.getRange(2, 1, pMatrix.length, 6);
+    const pMatrix = pRows.map(r => {
+      const dKey = String(r.semana || '').trim() + '__' + String(r.sesion || '').trim();
+      return [toSafeSheetCell(r.semana, 40), toSafeSheetCell(r.sesion, 60), toSafeSheetCell(r.bloque_a, 800), toSafeSheetCell(r.bloque_b, 800), toSafeSheetCell(r.bloque_c, 800), toSafeSheetCell(r.rpe, 20), (dMap[dKey] && dMap[dKey].completed) ? 'SI' : ''];
+    });
+    const pRange = planSheet.getRange(2, 1, pMatrix.length, 7);
     pRange.setNumberFormat('@');
     pRange.setValues(pMatrix);
   }
