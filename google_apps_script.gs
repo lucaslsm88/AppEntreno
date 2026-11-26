@@ -26,9 +26,12 @@ const MAX_AUTH_SKEW_MS = 5 * 60 * 1000; // Ventana máxima de 5 minutos (anti-re
 const MAX_PLAN_ROWS = 500;
 const MAX_HISTORY_ROWS = 2000;
 
-// Cierre de datos en doGet: NO expone ningún dato personal, pero verifica permisos de SpreadsheetApp
-// para que al pulsar "▷ Ejecutar" en Apps Script pida autorización y cree las 3 pestañas vacías.
-function doGet() {
+// Cierre de datos en doGet: si no trae un payload firmado con HMAC-SHA256, NO expone ningún dato personal.
+// Si recibe ?payload=... firmado criptográficamente, procesa la sincronización (evitando bloqueos CORS 302 de POST en navegadores).
+function doGet(e) {
+  if (e && e.parameter && typeof e.parameter.payload === 'string' && e.parameter.payload.length > 0) {
+    return handleAuthenticatedSync(e.parameter.payload);
+  }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureSheetsExist(ss);
   const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
@@ -43,9 +46,13 @@ function doGet() {
 }
 
 function doPost(e) {
-  const lock = LockService.getScriptLock();
+  const rawBody = (e && e.postData && typeof e.postData.contents === 'string') ? e.postData.contents : '';
+  return handleAuthenticatedSync(rawBody);
+}
+
+function handleAuthenticatedSync(rawBody) {
+  let lock = null;
   try {
-    const rawBody = (e && e.postData && typeof e.postData.contents === 'string') ? e.postData.contents : '';
     if (!rawBody || rawBody.length > MAX_PAYLOAD_BYTES) {
       return jsonResponse({ ok: false, error: 'Solicitud rechazada (tamaño inválido).' });
     }
@@ -78,6 +85,7 @@ function doPost(e) {
       return jsonResponse({ ok: false, error: 'Estado de cliente inválido.' });
     }
 
+    lock = LockService.getScriptLock();
     lock.waitLock(15000);
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     ensureSheetsExist(ss);
@@ -97,9 +105,11 @@ function doPost(e) {
   } catch (err) {
     return jsonResponse({ ok: false, error: 'Error interno al procesar sincronización.' });
   } finally {
-    try {
-      lock.releaseLock();
-    } catch (_) {}
+    if (lock) {
+      try {
+        lock.releaseLock();
+      } catch (_) {}
+    }
   }
 }
 

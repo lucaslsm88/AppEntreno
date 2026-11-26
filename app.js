@@ -2834,6 +2834,83 @@ async function buildSignedSyncEnvelope(apiSecret, clientStateObj) {
   };
 }
 
+async function sendSignedSyncRequest(url, apiSecret, clientPayload) {
+  const signedEnvelope = await buildSignedSyncEnvelope(apiSecret, clientPayload);
+  const envelopeStr = JSON.stringify(signedEnvelope);
+
+  // 1. Intentar POST directo con text/plain
+  try {
+    const postResp = await fetch(url, {
+      method: 'POST',
+      redirect: 'follow',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8'
+      },
+      body: envelopeStr
+    });
+    if (!postResp.ok) {
+      throw new Error(`HTTP ${postResp.status}`);
+    }
+    const postData = await postResp.json();
+    return postData;
+  } catch (postErr) {
+    const msg = String(postErr && postErr.message ? postErr.message : postErr);
+    if (!/failed to fetch|networkerror|load failed/i.test(msg)) {
+      throw postErr;
+    }
+
+    // 2. Respaldo automático anti-bloqueo CORS 302 de Google Apps Script mediante GET firmado con HMAC-SHA256
+    const encodedPayload = encodeURIComponent(envelopeStr);
+    const sep = url.includes('?') ? '&' : '?';
+
+    if (encodedPayload.length <= 6500) {
+      const getResp = await fetch(`${url}${sep}payload=${encodedPayload}`, {
+        method: 'GET',
+        redirect: 'follow'
+      });
+      if (!getResp.ok) {
+        throw new Error(`HTTP ${getResp.status}`);
+      }
+      const getData = await getResp.json();
+      if (getData && getData.ok && !getData.plan && getData.status) {
+        throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Gestionar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
+      }
+      return getData;
+    }
+
+    // 3. Si el paquete supera 6.5 KB (ej. carga masiva de Excel), enviar escritura por POST no-cors y leer estado fusionado por GET firmado
+    await fetch(url, {
+      method: 'POST',
+      mode: 'no-cors',
+      body: envelopeStr
+    });
+    const readOnlyEnvelope = await buildSignedSyncEnvelope(apiSecret, {
+      plan: { updatedAt: 0, isCustomData: false, rows: [] },
+      progress: {
+        cycleId: currentCycleId,
+        cycleUpdatedAt: cycleUpdatedAt || 0,
+        completedDays: {},
+        completedChecks: {},
+        sessionWeights: {}
+      },
+      weightHistory: []
+    });
+    const readEncoded = encodeURIComponent(JSON.stringify(readOnlyEnvelope));
+    const readResp = await fetch(`${url}${sep}payload=${readEncoded}`, {
+      method: 'GET',
+      redirect: 'follow'
+    });
+    if (!readResp.ok) {
+      throw new Error(`HTTP ${readResp.status}`);
+    }
+    const readData = await readResp.json();
+    if (readData && readData.ok && !readData.plan && readData.status) {
+      throw new Error('Actualiza el código en Apps Script (📋 Copiar código blindado → Pegar en Apps Script → Guardar → Gestionar implementaciones → ✏️ Editar → Versión: Nueva versión → Implementar).');
+    }
+    return readData;
+  }
+}
+
 async function syncWithGoogleSheets(options = { silent: true }) {
   if (!isCloudVaultUnlocked()) return false;
   if (isSyncInFlight) return false;
@@ -2844,23 +2921,7 @@ async function syncWithGoogleSheets(options = { silent: true }) {
   updateCloudStatusUI();
 
   try {
-    const signedEnvelope = await buildSignedSyncEnvelope(apiSecret, buildClientSyncPayload());
-
-    // Usamos text/plain sobre HTTPS para evitar bloqueo CORS preflight OPTIONS en Google Apps Script (incluido desde file:///)
-    const response = await fetch(url, {
-      method: 'POST',
-      redirect: 'follow',
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8'
-      },
-      body: JSON.stringify(signedEnvelope)
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
+    const data = await sendSignedSyncRequest(url, apiSecret, buildClientSyncPayload());
     if (!data || !data.ok) {
       throw new Error((data && data.error) || 'Respuesta rechazada por el servidor.');
     }
@@ -2928,7 +2989,10 @@ const MAX_AUTH_SKEW_MS = 5 * 60 * 1000;
 const MAX_PLAN_ROWS = 500;
 const MAX_HISTORY_ROWS = 2000;
 
-function doGet() {
+function doGet(e) {
+  if (e && e.parameter && typeof e.parameter.payload === 'string' && e.parameter.payload.length > 0) {
+    return handleAuthenticatedSync(e.parameter.payload);
+  }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureSheetsExist(ss);
   const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
@@ -2943,9 +3007,13 @@ function doGet() {
 }
 
 function doPost(e) {
-  const lock = LockService.getScriptLock();
+  const rawBody = (e && e.postData && typeof e.postData.contents === 'string') ? e.postData.contents : '';
+  return handleAuthenticatedSync(rawBody);
+}
+
+function handleAuthenticatedSync(rawBody) {
+  let lock = null;
   try {
-    const rawBody = (e && e.postData && typeof e.postData.contents === 'string') ? e.postData.contents : '';
     if (!rawBody || rawBody.length > MAX_PAYLOAD_BYTES) {
       return jsonResponse({ ok: false, error: 'Solicitud rechazada (tamano invalido).' });
     }
@@ -2977,6 +3045,7 @@ function doPost(e) {
       return jsonResponse({ ok: false, error: 'Estado de cliente invalido.' });
     }
 
+    lock = LockService.getScriptLock();
     lock.waitLock(15000);
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     ensureSheetsExist(ss);
@@ -2995,7 +3064,7 @@ function doPost(e) {
   } catch (err) {
     return jsonResponse({ ok: false, error: 'Error interno al procesar sincronizacion.' });
   } finally {
-    try { lock.releaseLock(); } catch (_) {}
+    if (lock) { try { lock.releaseLock(); } catch (_) {} }
   }
 }
 
