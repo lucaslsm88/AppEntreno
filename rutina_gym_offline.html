@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-07T4d2PEItgyU6cKJB5ivv+IGFT8NapArPGcUXjaKUc='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-uiwWvArjaZvZInHFCB2uAZCjnPJCaLmYA4kmjstdVek='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Mi Rutina">
@@ -4701,9 +4701,16 @@ const MAX_PLAN_ROWS = 500;
 const MAX_HISTORY_ROWS = 2000;
 
 function doGet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureSheetsExist(ss);
+  const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
+  const hasValidSecret = Boolean(secret && secret.trim().length >= 24);
   return jsonResponse({
     ok: true,
-    status: 'Servicio privado protegido. Autenticacion HMAC-SHA256 requerida.'
+    apiSecretConfigured: hasValidSecret,
+    status: hasValidSecret
+      ? 'Servicio privado blindado activo y autorizado. Autenticacion HMAC-SHA256 lista.'
+      : 'Permisos de hoja autorizados, pero falta configurar API_SECRET_KEY (min. 24 caracteres) en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
   });
 }
 

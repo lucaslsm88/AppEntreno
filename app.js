@@ -2907,9 +2907,16 @@ const MAX_PLAN_ROWS = 500;
 const MAX_HISTORY_ROWS = 2000;
 
 function doGet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureSheetsExist(ss);
+  const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
+  const hasValidSecret = Boolean(secret && secret.trim().length >= 24);
   return jsonResponse({
     ok: true,
-    status: 'Servicio privado protegido. Autenticacion HMAC-SHA256 requerida.'
+    apiSecretConfigured: hasValidSecret,
+    status: hasValidSecret
+      ? 'Servicio privado blindado activo y autorizado. Autenticacion HMAC-SHA256 lista.'
+      : 'Permisos de hoja autorizados, pero falta configurar API_SECRET_KEY (min. 24 caracteres) en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
   });
 }
 

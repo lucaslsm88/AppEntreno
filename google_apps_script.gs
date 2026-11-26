@@ -26,11 +26,19 @@ const MAX_AUTH_SKEW_MS = 5 * 60 * 1000; // Ventana máxima de 5 minutos (anti-re
 const MAX_PLAN_ROWS = 500;
 const MAX_HISTORY_ROWS = 2000;
 
-// Cierre total de doGet: abrir la URL en un navegador NO expone ningún dato personal
+// Cierre de datos en doGet: NO expone ningún dato personal, pero verifica permisos de SpreadsheetApp
+// para que al pulsar "▷ Ejecutar" en Apps Script pida autorización y cree las 3 pestañas vacías.
 function doGet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureSheetsExist(ss);
+  const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
+  const hasValidSecret = Boolean(secret && secret.trim().length >= 24);
   return jsonResponse({
     ok: true,
-    status: 'Servicio privado protegido. Autenticación HMAC-SHA256 requerida.'
+    apiSecretConfigured: hasValidSecret,
+    status: hasValidSecret
+      ? 'Servicio privado blindado activo y autorizado. Autenticacion HMAC-SHA256 lista.'
+      : 'Permisos de hoja autorizados, pero falta configurar API_SECRET_KEY (min. 24 caracteres) en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
   });
 }
 
