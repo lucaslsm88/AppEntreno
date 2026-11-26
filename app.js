@@ -2813,8 +2813,14 @@ function applyMergedCloudState(serverData) {
   }
 }
 
+function toAsciiSafeJson(obj) {
+  return JSON.stringify(obj).replace(/[\u007f-\uffff]/g, (ch) => {
+    return '\\u' + ('0000' + ch.charCodeAt(0).toString(16)).slice(-4);
+  });
+}
+
 async function buildSignedSyncEnvelope(apiSecret, clientStateObj) {
-  const clientStateJson = JSON.stringify(clientStateObj);
+  const clientStateJson = toAsciiSafeJson(clientStateObj);
   const ts = Date.now();
   const nonce = generateRandomHex(16); // 128 bits aleatorios únicos por petición
   const bodyHash = await sha256Hex(clientStateJson);
@@ -2844,7 +2850,6 @@ async function syncWithGoogleSheets(options = { silent: true }) {
     const response = await fetch(url, {
       method: 'POST',
       redirect: 'follow',
-      referrerPolicy: 'no-referrer',
       headers: {
         'Content-Type': 'text/plain;charset=utf-8'
       },
@@ -2880,20 +2885,25 @@ async function syncWithGoogleSheets(options = { silent: true }) {
     const safeDetail = String(err && err.message ? err.message : err)
       .replace(/https:\/\/script\.google\.com\/macros\/s\/[a-zA-Z0-9_-]+\/exec/gi, '[URL_PROTEGIDA]');
     console.warn('Sincronización diferida o rechazada:', safeDetail);
+    isSyncInFlight = false;
+    updateCloudStatusUI();
+    if (cloudSyncStatusInfo) {
+      cloudSyncStatusInfo.textContent = `⚠️ Error al sincronizar: ${safeDetail}`;
+    }
     if (!options.silent) {
       alert(
-        'No se pudo sincronizar con Google Sheets.\n\n' +
+        '⚠️ Motivo del error: ' + safeDetail + '\n\n' +
         'Verifica:\n' +
-        '1. Tener conexión a internet.\n' +
-        '2. Haber pegado el código blindado actualizado en Extensiones → Apps Script (Nueva implementación).\n' +
-        '3. Haber guardado la misma API_SECRET_KEY en Configuración del proyecto → Propiedades de secuencia de comandos.\n\n' +
-        'Detalle: ' + safeDetail
+        '1. Que la clave API_SECRET_KEY en la app sea exactamente la misma que guardaste en Apps Script (Configuración del proyecto → Propiedades de secuencia de comandos).\n' +
+        '2. Haber elegido "Versión: Nueva versión" y "Usuarios con acceso: Cualquier persona" al implementar en Apps Script.'
       );
     }
     return false;
   } finally {
-    isSyncInFlight = false;
-    updateCloudStatusUI();
+    if (isSyncInFlight) {
+      isSyncInFlight = false;
+      updateCloudStatusUI();
+    }
   }
 }
 
