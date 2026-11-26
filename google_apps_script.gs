@@ -41,16 +41,47 @@ const DEFAULT_PLAN_ROWS = [
   { semana: '4', sesion: 'Dia 3', bloque_a: 'Hip thrust con barra 3x8 (carga ligera)', bloque_b: 'Press banca con mancuernas 3x10\nRemo en polea baja 3x10', bloque_c: 'Paseo del granjero 2x30m', rpe: '6' }
 ];
 
-// Cierre de datos en doGet: si no trae un payload firmado con HMAC-SHA256, NO expone ningún dato personal.
-// Si recibe ?payload=... firmado criptográficamente, procesa la sincronización (evitando bloqueos CORS 302 de POST en navegadores).
+// Cierre de datos en doGet:
+// - Sin parámetros de firma: NO expone ningún dato personal (solo confirma estado del servicio).
+// - Con firma HMAC-SHA256 (?ts=...&nonce=...&sig=...): devuelve el estado actual de las 3 hojas por HTTP 200 GET.
+// - Con ?payload=... firmado: procesa sincronización completa.
 function doGet(e) {
-  if (e && e.parameter && typeof e.parameter.payload === 'string' && e.parameter.payload.length > 0) {
-    return handleAuthenticatedSync(e.parameter.payload);
+  const params = (e && e.parameter) ? e.parameter : {};
+  if (typeof params.payload === 'string' && params.payload.length > 0) {
+    return handleAuthenticatedSync(params.payload);
   }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureSheetsExist(ss);
   const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
   const hasValidSecret = Boolean(secret && secret.trim().length >= 24);
+
+  if (typeof params.sig === 'string' && params.sig.length > 0) {
+    if (!hasValidSecret) {
+      return jsonResponse({
+        ok: false,
+        error: 'Falta configurar API_SECRET_KEY en Configuración del proyecto -> Propiedades de secuencia de comandos.'
+      });
+    }
+    const authCheck = verifySignedGetRequest(params, secret.trim());
+    if (!authCheck.valid) {
+      return jsonResponse({ ok: false, error: authCheck.reason });
+    }
+    let currentState = readFullSheetState(ss);
+    if (!currentState.plan.rows || currentState.plan.rows.length === 0) {
+      currentState = mergeStates(currentState, { plan: { rows: [] }, progress: {}, weightHistory: [] });
+      writeFullSheetState(ss, currentState);
+    }
+    return jsonResponse({
+      ok: true,
+      apiSecretConfigured: true,
+      serverTime: Date.now(),
+      plan: currentState.plan,
+      progress: currentState.progress,
+      weightHistory: currentState.weightHistory
+    });
+  }
+
   return jsonResponse({
     ok: true,
     apiSecretConfigured: hasValidSecret,
@@ -174,6 +205,41 @@ function verifySignedRequest(payload, secret) {
   }
 
   // Protección anti-replay con CacheService (rechaza peticiones repetidas con el mismo nonce)
+  const cache = CacheService.getScriptCache();
+  const nonceKey = 'nonce_' + nonce.toLowerCase();
+  if (cache && cache.get(nonceKey)) {
+    return { valid: false, reason: 'No autorizado (solicitud duplicada detectada).' };
+  }
+  if (cache) {
+    cache.put(nonceKey, '1', 360);
+  }
+
+  return { valid: true };
+}
+
+function verifySignedGetRequest(params, secret) {
+  const ts = Number(params && params.ts);
+  const nonce = String((params && params.nonce) || '');
+  const sig = String((params && params.sig) || '').toLowerCase();
+
+  if (!ts || !isFinite(ts) || Math.abs(Date.now() - ts) > MAX_AUTH_SKEW_MS) {
+    return { valid: false, reason: 'No autorizado (marca de tiempo expirada o reloj desajustado).' };
+  }
+  if (!/^[a-f0-9]{24,64}$/i.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) {
+    return { valid: false, reason: 'No autorizado (formato de firma inválido).' };
+  }
+
+  const canonical = 'GET.' + String(ts) + '.' + nonce;
+  const computedHmacBytes = Utilities.computeHmacSha256Signature(
+    canonical,
+    secret,
+    Utilities.Charset.UTF_8
+  );
+  const computedSigHex = bytesToHex(computedHmacBytes);
+  if (!constantTimeEquals(computedSigHex, sig)) {
+    return { valid: false, reason: 'No autorizado (clave secreta incorrecta).' };
+  }
+
   const cache = CacheService.getScriptCache();
   const nonceKey = 'nonce_' + nonce.toLowerCase();
   if (cache && cache.get(nonceKey)) {

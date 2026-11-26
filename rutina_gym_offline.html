@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-jpmz7D/FoBgqsZvYTuErPObBvh6ii4g/lLyrS+R7qRw='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk=' 'sha256-Kyar2gmN9hsf9+PyXOeYyQEJw8uJXMvOLSgDoYcWcr0='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://*.googleusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none';">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Mi Rutina">
@@ -4635,46 +4635,69 @@ async function buildSignedSyncEnvelope(apiSecret, clientStateObj) {
   };
 }
 
-async function sendSignedSyncRequest(url, apiSecret) {
-  const fullPayload = buildClientSyncPayload({ includePlanRows: true });
-  const postEnvelope = await buildSignedSyncEnvelope(apiSecret, fullPayload);
-  const postEnvelopeStr = JSON.stringify(postEnvelope);
+function hasLocalMutationsToPush() {
+  return Boolean(
+    syncPending ||
+    isCustomData ||
+    currentCycleId > 1 ||
+    Object.keys(completedDays || {}).length > 0 ||
+    Object.keys(checksMeta || {}).length > 0 ||
+    Object.keys(sessionWeights || {}).length > 0 ||
+    (Array.isArray(weightHistory) && weightHistory.length > 0)
+  );
+}
 
-  // 1. Enviar POST firmado con HMAC-SHA256 a doPost(e) para actualizar Google Sheets.
-  // Nota: En algunos navegadores, Google Apps Script ejecuta doPost(e) y actualiza el Excel perfectamente,
-  // pero la redirección 302 posterior de POST a script.googleusercontent.com lanza "Failed to fetch" en modo CORS.
-  try {
-    const postResp = await fetch(url, {
-      method: 'POST',
-      redirect: 'follow',
-      body: postEnvelopeStr
-    });
-    if (postResp.ok) {
-      return await postResp.json();
-    }
-  } catch (postErr) {
-    const msg = String(postErr && postErr.message ? postErr.message : postErr);
-    if (!/failed to fetch|networkerror|load failed/i.test(msg)) {
-      throw postErr;
+async function buildSignedGetUrl(url, apiSecret) {
+  const ts = Date.now();
+  const nonce = generateRandomHex(16);
+  const canonical = `GET.${ts}.${nonce}`;
+  const sig = await hmacSha256Hex(apiSecret, canonical);
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}ts=${ts}&nonce=${nonce}&sig=${sig}`;
+}
+
+async function sendSignedSyncRequest(url, apiSecret) {
+  // 1. Si hay datos o cambios locales que subir, enviamos POST firmado con HMAC-SHA256 a doPost(e).
+  // Nota: En navegadores donde la redirección 302 de POST lanza "Failed to fetch" tras haber actualizado el Excel,
+  // capturamos ese bloqueo CORS de lectura y pasamos al paso 2 (lectura GET firmada).
+  if (hasLocalMutationsToPush()) {
+    const fullPayload = buildClientSyncPayload({ includePlanRows: true });
+    const postEnvelope = await buildSignedSyncEnvelope(apiSecret, fullPayload);
+    const postEnvelopeStr = JSON.stringify(postEnvelope);
+
+    try {
+      const postResp = await fetch(url, {
+        method: 'POST',
+        redirect: 'follow',
+        body: postEnvelopeStr
+      });
+      if (postResp.ok) {
+        return await postResp.json();
+      }
+    } catch (postErr) {
+      const msg = String(postErr && postErr.message ? postErr.message : postErr);
+      if (!/failed to fetch|networkerror|load failed/i.test(msg)) {
+        throw postErr;
+      }
     }
   }
 
-  // 2. El POST ya fue enviado (o redirigido con 302). Ahora realizamos un GET firmado con un NONCE NUEVO
-  // (< 500 caracteres) que siempre devuelve HTTP 200 sin bloqueo CORS 302 para confirmar y leer el estado de la hoja.
-  const sep = url.includes('?') ? '&' : '?';
-  const freshGetPayload = buildClientSyncPayload({ includePlanRows: false });
-  const freshGetEnvelope = await buildSignedSyncEnvelope(apiSecret, freshGetPayload);
-  const freshGetStr = JSON.stringify(freshGetEnvelope);
-  const encodedGet = encodeURIComponent(freshGetStr);
-
-  const getUrl = encodedGet.length <= 1700
-    ? `${url}${sep}payload=${encodedGet}`
-    : url;
-
-  const getResp = await fetch(getUrl, {
-    method: 'GET',
-    redirect: 'follow'
-  });
+  // 2. Lectura y verificación por GET con parámetros alfanuméricos limpios (?ts=...&nonce=...&sig=...)
+  // que nunca superan los 150 caracteres ni disparan filtros de URL larga en modo incógnito.
+  let getResp;
+  try {
+    const signedGetUrl = await buildSignedGetUrl(url, apiSecret);
+    getResp = await fetch(signedGetUrl, {
+      method: 'GET',
+      redirect: 'follow'
+    });
+  } catch (_) {
+    // Respaldo inmediato a la URL base si el navegador o script antiguo bloquea parámetros
+    getResp = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow'
+    });
+  }
 
   if (!getResp.ok) {
     throw new Error(`HTTP ${getResp.status}`);
@@ -4781,13 +4804,42 @@ const DEFAULT_PLAN_ROWS = [
 ];
 
 function doGet(e) {
-  if (e && e.parameter && typeof e.parameter.payload === 'string' && e.parameter.payload.length > 0) {
-    return handleAuthenticatedSync(e.parameter.payload);
+  const params = (e && e.parameter) ? e.parameter : {};
+  if (typeof params.payload === 'string' && params.payload.length > 0) {
+    return handleAuthenticatedSync(params.payload);
   }
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureSheetsExist(ss);
   const secret = PropertiesService.getScriptProperties().getProperty('API_SECRET_KEY');
   const hasValidSecret = Boolean(secret && secret.trim().length >= 24);
+
+  if (typeof params.sig === 'string' && params.sig.length > 0) {
+    if (!hasValidSecret) {
+      return jsonResponse({
+        ok: false,
+        error: 'Falta configurar API_SECRET_KEY en Configuracion del proyecto -> Propiedades de secuencia de comandos.'
+      });
+    }
+    const authCheck = verifySignedGetRequest(params, secret.trim());
+    if (!authCheck.valid) {
+      return jsonResponse({ ok: false, error: authCheck.reason });
+    }
+    let currentState = readFullSheetState(ss);
+    if (!currentState.plan.rows || currentState.plan.rows.length === 0) {
+      currentState = mergeStates(currentState, { plan: { rows: [] }, progress: {}, weightHistory: [] });
+      writeFullSheetState(ss, currentState);
+    }
+    return jsonResponse({
+      ok: true,
+      apiSecretConfigured: true,
+      serverTime: Date.now(),
+      plan: currentState.plan,
+      progress: currentState.progress,
+      weightHistory: currentState.weightHistory
+    });
+  }
+
   return jsonResponse({
     ok: true,
     apiSecretConfigured: hasValidSecret,
@@ -4886,6 +4938,36 @@ function verifySignedRequest(payload, secret) {
   }
 
   const canonical = String(ts) + '.' + nonce + '.' + computedBodyHex;
+  const computedSigHex = bytesToHex(
+    Utilities.computeHmacSha256Signature(canonical, secret, Utilities.Charset.UTF_8)
+  );
+  if (!constantTimeEquals(computedSigHex, sig)) {
+    return { valid: false, reason: 'No autorizado (clave secreta incorrecta).' };
+  }
+
+  const cache = CacheService.getScriptCache();
+  const nonceKey = 'nonce_' + nonce.toLowerCase();
+  if (cache && cache.get(nonceKey)) {
+    return { valid: false, reason: 'No autorizado (solicitud duplicada detectada).' };
+  }
+  if (cache) cache.put(nonceKey, '1', 360);
+
+  return { valid: true };
+}
+
+function verifySignedGetRequest(params, secret) {
+  const ts = Number(params && params.ts);
+  const nonce = String((params && params.nonce) || '');
+  const sig = String((params && params.sig) || '').toLowerCase();
+
+  if (!ts || !isFinite(ts) || Math.abs(Date.now() - ts) > MAX_AUTH_SKEW_MS) {
+    return { valid: false, reason: 'No autorizado (marca de tiempo expirada o reloj desajustado).' };
+  }
+  if (!/^[a-f0-9]{24,64}$/i.test(nonce) || !/^[a-f0-9]{64}$/.test(sig)) {
+    return { valid: false, reason: 'No autorizado (formato de firma invalido).' };
+  }
+
+  const canonical = 'GET.' + String(ts) + '.' + nonce;
   const computedSigHex = bytesToHex(
     Utilities.computeHmacSha256Signature(canonical, secret, Utilities.Charset.UTF_8)
   );
